@@ -147,11 +147,40 @@ ground-truth SDK findings captured on Linux.
 Note: the cloud built/tested against the Linux `libcg.so`; on this Windows desktop the code
 runs against `data/…/cg/cg.dll`. Re-verify `src/` runs on Windows before relying on it here.
 
+## AlphaZero self-play agent (the learned agent)
+
+Training runs in the **Python 3.12 venv** (`.venv/`); torch is training-only. Run all
+training-side code as `PYTHONPATH=src .venv/Scripts/python ...` (base 3.14 has no torch).
+
+Pipeline modules (all in `src/`):
+- `encode.py` — visible-info-only state vector (`STATE_DIM=342`) + per-option features
+  (`OPTION_DIM=24`). Info-hiding invariant tested.
+- `net.py` — tiny policy/value net (`PVNet`, ~78K params @ hidden=128). Policy scores each
+  legal option; `evaluate_np` for inference, `forward_batch` for training, `export_numpy`
+  for the torch-free submission forward.
+- `determinize.py` — samples the hidden world (opp hand/deck/prizes + own deck order) from
+  the deck distribution; engine-accepted.
+- `mcts.py` — determinized IS-MCTS over `search_begin/step`; net-valued leaves; signature-keyed
+  children; ~0.8 ms/sim, 0% truncation. `search(...)` returns the improved (visit) policy.
+- `selfplay.py` — MCTS self-play games → shaped-return training records (`outcome +
+  alpha*prize_diff`, alpha annealable); parallel across processes; npz storage.
+- `replay.py` — sliding-window replay buffer with padded/masked batch collation.
+- `train_step.py` — AlphaZero loss (policy CE vs visit dist + value MSE).
+- `evaluate.py` — win-rate ladder vs fixed reference (baseline + frozen snapshots).
+- `train.py` — **resumable orchestrator**. Artifacts under `runs/<name>/` (gitignored).
+
+Run training (fast-feedback defaults, ~minutes/iter on CPU):
+```
+PYTHONPATH=src .venv/Scripts/python src/train.py --name run1 --iters 20
+```
+Resume with the same `--name`. Progress curve is `runs/<name>/metrics.csv`
+(`wr_baseline` and `wr_pool` should rise across iters).
+
 ## Status / next steps
 - ✅ Both competitions understood; user entered in **both**. SDK verified on Win + Linux.
-- ✅ Foundations built, merged to desktop, pushed to `github.com/rubin-bot/tcgsimbot`.
-- ⏭️ Re-run `tests/` on Windows to confirm the merged code works against `cg.dll` here.
-- ⏭️ Build the **AlphaZero path**: visible-info state encoder → policy/value net → MCTS over
-  `search_begin/step/end` with determinization → self-play loop w/ checkpoint pool. (This is
-  the real agent; the baseline is just the sparring partner.)
-- ⏭️ Submit `submission.tar.gz` to `pokemon-tcg-ai-battle` to get on the ladder before Aug 16.
+- ✅ Foundations + full AlphaZero self-play loop built, tested, pushed to `rubin-bot/tcgsimbot`.
+- ⏭️ Run enough iterations to hit the success bar (learned agent ≥~60% vs baseline + rising
+  curve vs frozen checkpoints); then scale net/sims.
+- ⏭️ **Phase B**: extend `scripts/build_submission.py` to bundle a trained checkpoint + a
+  torch-free `net.export_numpy` forward (keep baseline fallback), then submit to
+  `pokemon-tcg-ai-battle` before Aug 16. Also: deck co-optimization (outer loop).

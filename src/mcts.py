@@ -141,11 +141,17 @@ def _simulate(root: Node, root_observation, root_gs, deck_list, net):
     tree node always corresponds to the current branching decision (empty selections are
     absorbed into the edges via _advance_to_branch)."""
     world = sample_determinization(root_gs, deck_list)
-    ss = search_begin(
-        root_observation, world["your_deck"], world["your_prize"],
-        world["opponent_deck"], world["opponent_prize"],
-        world["opponent_hand"], world["opponent_active"],
-    )
+    try:
+        ss = search_begin(
+            root_observation, world["your_deck"], world["your_prize"],
+            world["opponent_deck"], world["opponent_prize"],
+            world["opponent_hand"], world["opponent_active"],
+        )
+    except (RuntimeError, ValueError):
+        # Engine rejected this sampled world (e.g. a determinization that violates a setup
+        # constraint). Skip this simulation; if every sim fails, search() falls back to net
+        # priors. A rare skipped sim is acceptable and never crashes the run.
+        return
     sid = ss.searchId
     path = []
     node = root
