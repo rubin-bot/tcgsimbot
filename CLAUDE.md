@@ -169,12 +169,17 @@ Pipeline modules (all in `src/`):
 - `evaluate.py` — win-rate ladder vs fixed reference (baseline + frozen snapshots).
 - `train.py` — **resumable orchestrator**. Artifacts under `runs/<name>/` (gitignored).
 
-Run training (fast-feedback defaults, ~minutes/iter on CPU):
+Run training (16 cores, ~4 min/iter train-only, ~2.3 h for 30 iters):
 ```
-PYTHONPATH=src .venv/Scripts/python src/train.py --name run1 --iters 20
+PYTHONPATH=src .venv/Scripts/python src/train.py --name run2 --iters 30 \
+  --games-per-iter 32 --workers 16 --sims 32 --train-steps 300 --batch 256 \
+  --eval-every 5 --eval-sims 32 --eval-games 12 --gate-games 12
 ```
-Resume with the same `--name`. Progress curve is `runs/<name>/metrics.csv`
-(`wr_baseline` and `wr_pool` should rise across iters).
+`--eval-every N` runs the (expensive) net-vs-net eval+gate only every N iters;
+every iter still self-plays + trains (non-eval iters print `(train-only)`, blank
+win-rate cols). Resume/extend with the same `--name` and a higher `--iters`;
+Ctrl-C is safe between iters. Watch eval rows in `runs/<name>/metrics.csv`
+(`wr_baseline`→~0.60, `wr_pool` rising).
 
 ## Status / next steps
 - ✅ Both competitions understood; user entered in **both**. SDK verified on Win + Linux.
