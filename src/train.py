@@ -106,6 +106,8 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--eval-games", type=int, default=16)
     ap.add_argument("--gate-games", type=int, default=16)
+    ap.add_argument("--eval-every", type=int, default=5,
+                    help="run the (expensive net-vs-net) eval + gate only every N iters")
     ap.add_argument("--gate-thresh", type=float, default=0.55)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -155,30 +157,33 @@ def main():
         buf = ReplayBuffer(run.data_dir, max_games=args.buffer_games)
         loss, pl, vl = train(learner, buf, opt, args.train_steps, args.batch)
 
-        # 3) eval vs fixed reference set
-        opponents = {"baseline": baseline_agent}
-        for i, pf in enumerate(pool_files):
-            opponents[f"ckpt{i}"] = make_net_agent(PVNet.load(pf), deck, sims=args.eval_sims)
-        ev = evaluate(learner, opponents, deck, n_games=args.eval_games, sims=args.eval_sims,
-                      base_seed=it * 7 + 1)
-        wr_baseline = ev["baseline"]
-        pool_wrs = [ev[k] for k in ev if k.startswith("ckpt")]
-        wr_pool = sum(pool_wrs) / len(pool_wrs)
-
-        # 4) gate: learner vs generator head-to-head
-        gen = PVNet.load(run.best_path)
-        gate = win_rate(make_net_agent(learner, deck, sims=args.eval_sims),
-                        make_net_agent(gen, deck, sims=args.eval_sims),
-                        deck, args.gate_games, base_seed=it * 13 + 5)
-        promoted = gate >= args.gate_thresh
-        if promoted:
-            learner.save(run.best_path)                  # promote to generator
-            if it % args.snapshot_every == 0 or len(pool_files) < 2:
+        # 3+4) eval vs fixed reference + gated promotion -- PERIODIC (net-vs-net games are the
+        # main cost and are pure measurement, so most iters skip them and just keep learning).
+        do_eval = (it % args.eval_every == 0) or (it == args.iters - 1)
+        wr_b_s = wr_p_s = gate_s = ""
+        promoted = False
+        if do_eval:
+            opponents = {"baseline": baseline_agent}
+            for i, pf in enumerate(pool_files):
+                opponents[f"ckpt{i}"] = make_net_agent(PVNet.load(pf), deck, sims=args.eval_sims)
+            ev = evaluate(learner, opponents, deck, n_games=args.eval_games, sims=args.eval_sims,
+                          base_seed=it * 7 + 1)
+            wr_baseline = ev["baseline"]
+            pool_wrs = [ev[k] for k in ev if k.startswith("ckpt")]
+            wr_pool = sum(pool_wrs) / len(pool_wrs)
+            gen = PVNet.load(run.best_path)
+            gate = win_rate(make_net_agent(learner, deck, sims=args.eval_sims),
+                            make_net_agent(gen, deck, sims=args.eval_sims),
+                            deck, args.gate_games, base_seed=it * 13 + 5)
+            promoted = gate >= args.gate_thresh
+            if promoted:                                  # promote learner -> generator + snapshot
+                learner.save(run.best_path)
                 snap = os.path.join(run.pool_dir, f"ckpt_{len(pool_files)}.pt")
                 learner.save(snap)
                 pool_files.append(snap)
                 if len(pool_files) > args.max_pool:
                     pool_files = [pool_files[0]] + pool_files[-(args.max_pool - 1):]
+            wr_b_s, wr_p_s, gate_s = f"{wr_baseline:.3f}", f"{wr_pool:.3f}", f"{gate:.3f}"
 
         # persist (resumable, Ctrl-C safe between iters)
         learner.save(run.learner_path)
@@ -188,12 +193,12 @@ def main():
         dt = time.time() - t0
         run.log_metrics(
             [it, f"{alpha:.3f}", n, f"{loss:.3f}", f"{pl:.3f}", f"{vl:.3f}",
-             f"{wr_baseline:.3f}", f"{wr_pool:.3f}", f"{gate:.3f}", int(promoted), f"{dt:.1f}"],
+             wr_b_s, wr_p_s, gate_s, int(promoted), f"{dt:.1f}"],
             ["iter", "alpha", "games", "loss", "policy", "value",
              "wr_baseline", "wr_pool", "gate", "promoted", "sec"])
-        print(f"iter {it:3d} | a={alpha:.2f} games={n} loss={loss:.3f} "
-              f"wr_base={wr_baseline:.2f} wr_pool={wr_pool:.2f} gate={gate:.2f} "
-              f"{'PROMOTED' if promoted else ''} | {dt:.0f}s")
+        evtxt = (f"wr_base={wr_b_s} wr_pool={wr_p_s} gate={gate_s} "
+                 f"{'PROMOTED' if promoted else ''}") if do_eval else "(train-only)"
+        print(f"iter {it:3d} | a={alpha:.2f} games={n} loss={loss:.3f} {evtxt} | {dt:.0f}s")
 
     print(f"done. metrics -> {run.metrics_path}")
 
