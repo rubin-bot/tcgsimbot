@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pokémon Elements — "Competition Use Only" under the Kaggle Competition Rules.
+# MUST NOT be committed, bundled to the cloud, or pushed anywhere. Delete after
+# the competition. This covers the card data, card-image PDFs, the cabt engine
+# (C++ source + compiled cg.dll/libcg.*), and the rules skill.
+# ─────────────────────────────────────────────────────────────────────────────
+data/
+*.zip
+*.skill
+.claude/skills/pokemon-tcg-rules/
+
+# Compiled engine libraries (Pokémon Elements) if copied elsewhere
+*.dll
+*.so
+*.dylib
+
+# Trained artifacts / large binaries (keep out of git; store/track separately)
+*.pt
+*.pth
+*.onnx
+*.ckpt
+checkpoints/
+replays/
+runs/
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
