@@ -22,6 +22,9 @@ submission/
 # Trained artifacts / large binaries (keep out of git; store/track separately)
 *.pt
 *.pth
+selfplay_data/
+metrics.csv
+logs/
 *.onnx
 *.ckpt
 checkpoints/

@@ -1,0 +1,10 @@
+# Training-time dependencies (NOT bundled into the Kaggle submission — the submitted
+# agent does a torch-free NumPy forward from exported weights; see the plan).
+#
+# Install into a dedicated Python 3.12 venv (torch has no reliable 3.14 wheels):
+#   py -3.12 -m venv .venv
+#   .venv/Scripts/python -m pip install -r requirements.txt
+#
+# torch here is the CPU build (no GPU on this machine).
+torch>=2.3
+numpy>=1.26

@@ -254,12 +254,18 @@ def decode_selection(select: SelectData, game_state: GameState) -> Selection:
     )
 
 
-def parse_obs(obs_dict: dict):
-    """Returns (game_state, selection). Both are None only at the very first call
-    (obs.select is None), when the caller must return the 60-card deck instead."""
-    observation: Observation = to_observation_class(obs_dict)
+def parse_observation(observation: Observation):
+    """Parse an already-deserialized Observation (e.g. one returned by cg.api.search_begin/
+    search_step, which hand back Observation dataclasses rather than raw dicts).
+    Returns (game_state, selection), or (None, None) at the deck-selection phase / terminal."""
     if observation.select is None or observation.current is None:
         return None, None
     game_state = parse_state(observation.current)
     selection = decode_selection(observation.select, game_state)
     return game_state, selection
+
+
+def parse_obs(obs_dict: dict):
+    """Returns (game_state, selection). Both are None only at the very first call
+    (obs.select is None), when the caller must return the 60-card deck instead."""
+    return parse_observation(to_observation_class(obs_dict))
