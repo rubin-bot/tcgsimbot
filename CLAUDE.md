@@ -4,6 +4,15 @@ Kaggle Featured Hackathon by The Pokémon Company. This repo is the workspace fo
 in **The Pokémon Company – PTCG AI Battle Challenge**. Entered under account
 rubinsahota2009@gmail.com. **$240,000** prize pool (8 finalists × $30,000).
 
+## Version control
+
+- **GitHub repo:** https://github.com/rubin-bot/tcgsimbot (branch `main`)
+- **Version-control all future changes here:** commit locally and `git push origin main`
+  from this desktop clone. Push works from the desktop (`gh` authed as `rubin-bot`); it does
+  NOT work from the cloud web sessions (their git gateway is scoped to other repos).
+- Never commit Pokémon Elements — `.gitignore` keeps `data/` (card data, PDFs, the cg SDK &
+  compiled libs) and the rules skill out of git. Keep it that way.
+
 ## The competition is two paired parts — we must enter both
 
 | | **Simulation Category** (`pokemon-tcg-ai-battle`) | **Strategy Category** (`…-strategy`) |
@@ -118,12 +127,31 @@ Verified working on Windows / Python 3.14 (`cg.dll`). Smoke test:
 `data/pokemon-tcg-ai-battle/sample_submission/sample_submission/smoke_test.py`
 (run with `PYTHONIOENCODING=utf-8`).
 
+## Foundations (built & verified in a cloud session on Linux, merged here 2026-07-21)
+
+All under `src/` / `tests/`, verified against the real engine. See `docs/sdk_notes.md` for
+ground-truth SDK findings captured on Linux.
+- `src/carddata.py` — `load_card_index()` joins engine `all_card_data()`/`all_attack()` with
+  `EN_Card_Data.csv` effect text (join key = Card ID == engine cardId).
+- `src/obs.py` — `parse_obs()` → typed, **information-hidden** GameState + classified legal
+  options (opponent hand never exposed; invariant tested).
+- `src/baseline.py` — priority-heuristic agent (lethal → attach energy → evolve → best attack
+  → conditional retreat → fallback). **66–70% vs random.** Sparring partner / fallback only —
+  NOT the learned agent.
+- `src/sdk_path.py` — locates the gitignored cg SDK under `data/`.
+- `decks/baseline_deck.csv` — legal 60-card Water deck (Finizen/Palafin + Totodile line +
+  Bruxish + energy), validated via `battle_start`.
+- `scripts/build_submission.py` — assembles `submission.tar.gz` (~0.48 MiB, well under the
+  197.7 MiB cap) from source; `submission/` and `*.tar.gz` are gitignored build output.
+
+Note: the cloud built/tested against the Linux `libcg.so`; on this Windows desktop the code
+runs against `data/…/cg/cg.dll`. Re-verify `src/` runs on Windows before relying on it here.
+
 ## Status / next steps
-- ✅ Both competitions understood; user entered in **both** (Simulation joined 2026-07-21).
-- ✅ SDK downloaded; local engine loads and plays a full random-vs-random game.
-- ⏭️ Read `api.html`/`game.html` + the simulator-vs-official rule-differences page.
-- ⏭️ Build a card-data layer (join engine `all_card_data()` with our CSV effect text) and a
-  readable state/observation wrapper.
-- ⏭️ Replace the random agent with a heuristic baseline (attach energy, attack for KO, take
-  prizes), then a **search-based** agent using `search_begin/step/end`.
-- ⏭️ Design a real deck (current `deck.csv` is a placeholder) and package a first submission.
+- ✅ Both competitions understood; user entered in **both**. SDK verified on Win + Linux.
+- ✅ Foundations built, merged to desktop, pushed to `github.com/rubin-bot/tcgsimbot`.
+- ⏭️ Re-run `tests/` on Windows to confirm the merged code works against `cg.dll` here.
+- ⏭️ Build the **AlphaZero path**: visible-info state encoder → policy/value net → MCTS over
+  `search_begin/step/end` with determinization → self-play loop w/ checkpoint pool. (This is
+  the real agent; the baseline is just the sparring partner.)
+- ⏭️ Submit `submission.tar.gz` to `pokemon-tcg-ai-battle` to get on the ladder before Aug 16.
