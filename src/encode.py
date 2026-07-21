@@ -27,7 +27,7 @@ from sdk_path import ensure_cg_importable
 
 ensure_cg_importable()
 
-from cg.api import CardType, EnergyType, all_attack, all_card_data  # noqa: E402
+from cg.api import AreaType, CardType, EnergyType, all_attack, all_card_data  # noqa: E402
 
 from obs import GameState, LegalOption, PlayerView, PokemonView  # noqa: E402
 
@@ -59,7 +59,7 @@ _PLAYER_COUNTS = 3      # prize remaining, deck count, discard count
 _PLAYER_DIM = (1 + MAX_BENCH) * _SLOT_DIM + _HAND_DIM + _PLAYER_COUNTS
 _GLOBAL_DIM = 8
 STATE_DIM = _GLOBAL_DIM + 2 * _PLAYER_DIM
-OPTION_DIM = len(_KINDS) + 7
+OPTION_DIM = len(_KINDS) + 15
 
 
 def _stage_flags(card_id: int) -> tuple[float, float, float]:
@@ -162,39 +162,57 @@ def _best_attack_damage(card_id: int) -> int:
 
 
 def encode_option(gs: GameState, lo: LegalOption) -> np.ndarray:
-    """Per-option features: kind one-hot + a few numerics. Deliberately gives the net raw
-    signals (attack damage, target HP) rather than derived judgments like 'is lethal' -- the
-    net learns how to use them; no strategy is baked in here."""
+    """Per-option features: kind one-hot + numerics. Includes the raw positional/target fields
+    (which board slot, which source card, energy/tool index) so that options of the SAME kind --
+    e.g. "attach energy to bench slot 0" vs "slot 1" -- get DISTINCT features; otherwise the
+    policy head cannot express a preference between them. Gives the net raw signals (attack
+    damage, target HP) rather than derived judgments like 'is lethal' -- no strategy baked in."""
+    raw = lo.raw
     kind_oh = [0.0] * len(_KINDS)
     if lo.kind in _KIND_INDEX:
         kind_oh[_KIND_INDEX[lo.kind]] = 1.0
 
-    atk_dmg = 0.0
-    atk_cost = 0.0
-    if lo.kind == "attack" and lo.raw.attackId is not None:
-        atk = _ATTACK_BY_ID.get(lo.raw.attackId)
+    atk_dmg = atk_cost = 0.0
+    if lo.kind == "attack" and raw.attackId is not None:
+        atk = _ATTACK_BY_ID.get(raw.attackId)
         if atk is not None:
             atk_dmg = atk.damage / _DMG_NORM
             atk_cost = len(atk.energies) / _ENERGY_NORM
 
-    target_hp_frac = 0.0
-    target_present = 0.0
+    # target Pokemon (of an attach/evolve/energy option): identity by slot + state
+    target_present = target_hp_frac = target_energy = target_slot = 0.0
     if lo.target is not None:
         target_present = 1.0
         target_hp_frac = lo.target.hp / max(lo.target.max_hp, 1)
+        target_energy = len(lo.target.energies) / _ENERGY_NORM
+    if raw.inPlayArea == AreaType.ACTIVE:
+        target_slot = 0.0
+    elif raw.inPlayArea == AreaType.BENCH and raw.inPlayIndex is not None:
+        target_slot = (raw.inPlayIndex + 1) / 6.0
 
-    card_hp = 0.0
-    card_is_ex = 0.0
-    card_stage = 0.0
+    card_hp = card_is_ex = card_stage = 0.0
     if lo.card is not None:
         c = _CARD_BY_ID.get(lo.card.card_id)
         if c is not None:
             card_hp = c.hp / _HP_NORM
             card_is_ex = float(bool(c.ex))
             basic, s1, s2 = _stage_flags(lo.card.card_id)
-            card_stage = 0.0 * basic + 0.5 * s1 + 1.0 * s2
+            card_stage = 0.5 * s1 + 1.0 * s2
 
-    numerics = [atk_dmg, atk_cost, target_hp_frac, target_present, card_hp, card_is_ex, card_stage]
+    # raw engine fields that disambiguate otherwise-identical options
+    src_index = (raw.index or 0) / 20.0
+    inplay_idx = (raw.inPlayIndex or 0) / 6.0
+    energy_idx = (raw.energyIndex or 0) / 6.0
+    tool_idx = (raw.toolIndex or 0) / 2.0
+    number = (raw.number or 0) / 20.0
+    area_code = (int(raw.area) if raw.area is not None else 0) / 12.0
+
+    numerics = [
+        atk_dmg, atk_cost,
+        target_present, target_hp_frac, target_energy, target_slot,
+        card_hp, card_is_ex, card_stage,
+        src_index, inplay_idx, energy_idx, tool_idx, number, area_code,
+    ]
     vec = kind_oh + numerics
     assert len(vec) == OPTION_DIM, (len(vec), OPTION_DIM)
     return np.asarray(vec, dtype=np.float32)
