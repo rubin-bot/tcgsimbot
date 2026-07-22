@@ -107,8 +107,16 @@ def _generate_worker(net_path, deck_list, n_games, out_dir, sims, alpha, temp_mo
     written = 0
     for g in range(n_games):
         seed = base_seed + wid * 1_000_003 + g
-        records, result, final_remaining = play_game(
-            net, deck_list, sims=sims, temp_moves=temp_moves, seed=seed)
+        try:
+            records, result, final_remaining = play_game(
+                net, deck_list, sims=sims, temp_moves=temp_moves, seed=seed)
+        except (OSError, RuntimeError) as e:
+            # A rare engine-side fault (e.g. a cg.dll access violation surfacing as an
+            # OSError) must not take down the whole worker pool and lose the rest of the
+            # iteration's self-play -- skip just this one game. Deliberately no
+            # battle_finish() here: battle_ptr may now point at corrupted native state.
+            print(f"[selfplay] worker {wid} game {g} (seed={seed}) failed: {e!r}", flush=True)
+            continue
         if result == -1 or not records:
             continue
         arrays = build_arrays(records, result, final_remaining, alpha)

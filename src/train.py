@@ -58,6 +58,22 @@ def clone(net):
     return copy.deepcopy(net).eval()
 
 
+def _next_ckpt_path(pool_dir):
+    """Next unique ckpt_N.pt path, scanning existing files so the id keeps climbing even
+    after pool_files (the in-memory list) gets truncated to --max-pool entries -- using
+    len(pool_files) for the id would collide with an already-truncated list and silently
+    overwrite an old snapshot."""
+    ids = []
+    for name in os.listdir(pool_dir):
+        if name.startswith("ckpt_") and name.endswith(".pt"):
+            try:
+                ids.append(int(name[len("ckpt_"):-len(".pt")]))
+            except ValueError:
+                pass
+    next_id = (max(ids) + 1) if ids else 0
+    return os.path.join(pool_dir, f"ckpt_{next_id}.pt")
+
+
 class Run:
     def __init__(self, root, hidden):
         self.root = root
@@ -178,7 +194,7 @@ def main():
             promoted = gate >= args.gate_thresh
             if promoted:                                  # promote learner -> generator + snapshot
                 learner.save(run.best_path)
-                snap = os.path.join(run.pool_dir, f"ckpt_{len(pool_files)}.pt")
+                snap = _next_ckpt_path(run.pool_dir)
                 learner.save(snap)
                 pool_files.append(snap)
                 if len(pool_files) > args.max_pool:

@@ -159,7 +159,12 @@ def _simulate(root: Node, root_observation, root_gs, deck_list, net):
     try:
         cur = ss
         while True:
-            cur, gs, sel, result, depth = _advance_to_branch(sid, cur, depth)
+            try:
+                cur, gs, sel, result, depth = _advance_to_branch(sid, cur, depth)
+            except (RuntimeError, ValueError):
+                # Engine rejected a forced/empty-selection step in this sampled world.
+                # Abandon this simulation cleanly -- no backup, so nothing is corrupted.
+                return
             if result != -1 or gs is None or sel is None or depth > MAX_DEPTH:   # terminal
                 if path:
                     leaf_player = path[-1][0].to_move
@@ -184,7 +189,7 @@ def _simulate(root: Node, root_observation, root_gs, deck_list, net):
                 node.children[sig] = child
             try:
                 cur = search_step(sid, index_list)
-            except ValueError:
+            except (RuntimeError, ValueError):
                 # Engine rejected the step (e.g. signature collision mapped to an option that is
                 # illegal in this sampled world). Abandon this simulation cleanly -- no backup,
                 # so nothing is corrupted; a rare wasted sim is acceptable.
