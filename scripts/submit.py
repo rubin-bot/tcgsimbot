@@ -13,31 +13,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import shutil
+import os
 import subprocess
 import sys
 
-COMPETITION = "pokemon-tcg-ai-battle"
-
-
-def _find_kaggle_python() -> list[str]:
-    """The `kaggle` package lives in the base Python install (py launcher), not this repo's
-    .venv (confirmed: `kaggle` is absent from .venv, present as CLI 2.2.3 under `py`) --
-    prefer whichever interpreter actually has it importable, checking the current one first
-    so this still works if that ever changes."""
-    if importlib.util.find_spec("kaggle") is not None:
-        return [sys.executable]
-    if shutil.which("py"):
-        probe = subprocess.run(["py", "-c", "import kaggle"], capture_output=True)
-        if probe.returncode == 0:
-            return ["py"]
-    if shutil.which("python"):
-        probe = subprocess.run(["python", "-c", "import kaggle"], capture_output=True)
-        if probe.returncode == 0:
-            return ["python"]
-    sys.exit("Could not find a Python interpreter with the `kaggle` package installed "
-             "(checked current interpreter, `py`, `python`).")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "tools"))
+from kaggle_common import SIMULATION_COMPETITION as COMPETITION, find_kaggle_python  # noqa: E402
 
 
 def main() -> None:
@@ -48,7 +30,7 @@ def main() -> None:
                      help="print the command without running it")
     args = ap.parse_args()
 
-    python_cmd = _find_kaggle_python()
+    python_cmd = find_kaggle_python()
     cmd = python_cmd + ["-m", "kaggle", "competitions", "submit",
                          "-c", COMPETITION, "-f", args.tarball, "-m", args.message]
 

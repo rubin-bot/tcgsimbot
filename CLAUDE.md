@@ -222,6 +222,20 @@ SearchScorer agent), `src/selfplay.py`, `src/replay.py`, `src/train_step.py`,
 `runs/` (training artifacts, gitignored) and any `--mode net` path through
 `scripts/build_submission.py` belong to this deprecated pipeline too.
 
+## Iterate workflow (Stage 6)
+
+Whenever the user says "iterate" (or `/iterate`) in any session, run the full Stage 6 loop
+documented in `ITERATE.md`: **MEASURE** (`tools/measure.py` — pull ladder μ into
+`VERSIONS.md`, pull any of our games from the newest Kaggle episode-replay dataset) →
+**DIAGNOSE** (`tools/autopsy.py --source auto` — ranked shortcomings report, ladder replays if
+we have real losses, local `baseline`/`random` fallback otherwise, built on
+`tools/loss_review.py`) → **FIX** (one candidate for the top failure mode, proven over 400+
+games via a Kaggle kernel attached to the competition, `scripts/build_kernel_bakeoff.py` — no
+proven win, no ship) → **SHIP** (`scripts/build_submission.py` →
+`scripts/verify_submission.py` → `scripts/submit.py`, log in `VERSIONS.md`, commit + push).
+`ITERATE.md` and `.claude/skills/iterate/SKILL.md` are the source of truth for the exact
+commands; this is just the pointer. Still 1 submission/day, still ≤2 local sim workers.
+
 ## Status / next steps
 - ✅ Both competitions understood; user entered in **both**. SDK verified on Win + Linux.
 - ✅ Active foundations (carddata/obs/baseline/sdk_path/encode) built, tested, pushed to
@@ -233,6 +247,9 @@ SearchScorer agent), `src/selfplay.py`, `src/replay.py`, `src/train_step.py`,
 - ✅ **v1 shipped** — `scripts/build_submission.py --mode search_scorer`, verified via
   `scripts/verify_submission.py`'s fresh-extraction smoke test, submitted via
   `scripts/submit.py`. See `VERSIONS.md` for the exact weights/changes and μ once scored.
+- ✅ **Stage 6 tooling built**: `tools/measure.py`, `tools/autopsy.py`,
+  `scripts/build_kernel_bakeoff.py`, `ITERATE.md`, `.claude/skills/iterate/`. See the
+  "Iterate workflow" section above.
 - ⏭️ **Stage 6 from here on**: watch the ladder μ, pull Kaggle episode replays for real
-  losses (richer than local `baseline`/`random`), autopsy, one fix, regression-check locally
-  (not gate on it), resubmit — 1/day per the Submission policy above.
+  losses (richer than local `baseline`/`random`), autopsy, one fix proven on a Kaggle kernel,
+  resubmit — 1/day per the Submission policy above.
