@@ -32,6 +32,14 @@ replays/
 runs/
 wandb/
 
+# Diagnostic/log output scattered at repo root during eval/tuning sessions -- the permanent
+# record lives in runs/ (already gitignored above) or VERSIONS.md/CLAUDE.md prose.
+/*.jsonl
+/*.log
+
+# Kaggle credentials, if ever present inside the repo (normally ~/.kaggle, outside it)
+.kaggle/
+
 # Python
 __pycache__/
 *.py[cod]

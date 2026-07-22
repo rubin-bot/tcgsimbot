@@ -103,6 +103,11 @@ def save_game(path: str, arrays: dict):
 
 
 def _generate_worker(net_path, deck_list, n_games, out_dir, sims, alpha, temp_moves, base_seed, wid):
+    # Each worker is its own process; without this, every worker's torch would default to a
+    # multi-threaded BLAS/OpenMP pool sized to ALL cores, so N workers means N x oversubscription
+    # of the machine (the cause of a full CPU/RAM-exhaustion crash observed during testing).
+    import torch
+    torch.set_num_threads(1)
     net = PVNet.load(net_path)
     written = 0
     for g in range(n_games):
@@ -122,19 +127,41 @@ def _generate_worker(net_path, deck_list, n_games, out_dir, sims, alpha, temp_mo
         arrays = build_arrays(records, result, final_remaining, alpha)
         save_game(os.path.join(out_dir, f"game_w{wid}_g{g}_{seed}.npz"), arrays)
         written += 1
+        print(f"[selfplay] worker {wid}: game {g + 1}/{n_games} done ({written} written)",
+              flush=True)
     return written
 
 
 def generate(net_path, deck_list, n_games, out_dir, workers=1, sims=50, alpha=0.3,
-             temp_moves=10, base_seed=0):
-    """Generate `n_games` self-play games (parallel across `workers` processes)."""
+             temp_moves=10, base_seed=0, timeout=1800):
+    """Generate `n_games` self-play games (parallel across `workers` processes).
+
+    `timeout` bounds how long we wait on a hung/deadlocked worker pool before terminating it
+    and moving on -- games already written to `out_dir` (each worker saves per-game, before
+    returning) are never lost even if the pool is force-killed.
+    """
     os.makedirs(out_dir, exist_ok=True)
+    # Set for the parent too (covers workers<=1, which runs in-process) and so children that
+    # import torch during unpickling (before _generate_worker's own set_num_threads runs)
+    # inherit a capped thread pool from process creation, not just from our explicit call.
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
     if workers <= 1:
         return _generate_worker(net_path, deck_list, n_games, out_dir, sims, alpha,
                                 temp_moves, base_seed, 0)
-    from multiprocessing import Pool
+    from multiprocessing import Pool, TimeoutError as MPTimeoutError
     per = [n_games // workers + (1 if i < n_games % workers else 0) for i in range(workers)]
     args = [(net_path, deck_list, per[i], out_dir, sims, alpha, temp_moves, base_seed, i)
             for i in range(workers) if per[i] > 0]
     with Pool(len(args)) as pool:
-        return sum(pool.starmap(_generate_worker, args))
+        async_res = pool.starmap_async(_generate_worker, args)
+        try:
+            return sum(async_res.get(timeout=timeout))
+        except MPTimeoutError:
+            print(f"[selfplay] self-play timed out after {timeout}s ({len(args)} workers) "
+                  "-- terminating hung pool, continuing with games already written to disk",
+                  flush=True)
+            pool.terminate()
+            return 0

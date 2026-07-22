@@ -30,20 +30,91 @@ Simulation allows **5 submissions/day**. Max team size 5.
 > (`userHasEntered: True` for both). First Simulation submission (baseline rule-based
 > agent) made 2026-07-22.
 
+## ARCHITECTURE DECISION (do not revisit)
+
+**NO self-play RL, NO AlphaZero.** The self-play/MCTS/neural-net training loop (see
+"Deprecated" section below) crashed the user's laptop repeatedly during training, and
+public ladder results show search + a tuned heuristic scorer beating RL+MCTS in this
+environment. We build instead:
+
+1. A **SearchScorer** agent using the cg SDK's native `search_begin`/`search_step`
+   lookahead API + a hand-crafted `evaluate()` heuristic. ✅ Built (`agents/search_scorer.py`).
+2. A **crash-proof local eval harness** (see Hardware rules below). ✅ Built
+   (`tools/eval_arena.py`, `tools/_eval_worker.py`).
+3. **Offline weight tuning** (CMA-ES, `tools/tune_weights.py`) over the local arena. ✅ Run
+   once (`runs/tune_run1`): converged but stalled at ~44% vs. `baseline` (95% CI overlapping
+   every pre-tuning number) — confirmed the local win-rate plateau was a missing-feature
+   problem, not a weight-calibration one. One more feature cycle (energy-routing: added
+   `turns_to_power`/`wasted_energy`, diagnosed via `tools/loss_review.py`'s feature-level
+   traces) landed before shipping v1, per the policy change below.
+4. An **optional tiny numpy-only policy net** via behavior cloning (no RL, no torch at
+   inference time). Not built — superseded by the policy change below; may revisit if the
+   ladder autopsy loop calls for it.
+5. **Packaging + Kaggle submission** (`scripts/build_submission.py --mode search_scorer`,
+   `scripts/verify_submission.py`, `scripts/submit.py`). ✅ v1 shipped — see `VERSIONS.md`.
+6. A **daily "iterate" loop**: measure ladder μ → autopsy losses (from Kaggle episode
+   replays, not just local games) → one fix → verify locally (regression check only, not the
+   bar) → resubmit. **This is the active mode from v1 onward** — see the policy change below.
+
+### Local-arena gate retired as of v1 — the ladder is now the judge
+
+The original plan gated shipping on **60%+ vs. `baseline` over 200-300 local games**. That
+bar was never cleared (best local result: ~44%, CMA-ES-tuned, statistically indistinguishable
+from every pre-tuning run) despite two full feature-diagnosis cycles finding and fixing real,
+evidenced gaps each time (tie-collapse → tie-break fix; threat/bench/tempo blindness → new
+features; energy-routing → `turns_to_power`/`wasted_energy`). Each cycle measurably changed
+*behavior* (attack-decline 46.5%→~11%, for instance) without moving the win-rate number much,
+which is itself informative: **`baseline` and `random` are two narrow, non-representative
+opponents** — real ladder opponents (Trainer-card decks, different archetypes, ex/Mega
+strategies) are a fundamentally richer test than anything two fixed local bots can provide,
+and Kaggle episode replays (real losses, real opponent decks) are strictly more informative
+than another synthetic local cycle chasing the same two opponents. Per the decision made
+shipping v1: **stop gating on local win rate, ship, and let the live ladder + loss autopsies
+(Stage 6) drive future iteration.** The local arena (`tools/eval_arena.py`) keeps a real job —
+**pre-submission regression check** (did this change break something that used to work,
+measured against `baseline`/`random`/prior versions before a resubmit) — but it is no longer
+the thing progress is judged against.
+
+### Hardware rules (always enforce)
+
+Max 2 simulator processes at once; total RAM under ~6 GB; every game runs in its own
+subprocess with a timeout + RSS cap; stream data to disk, not RAM; every long-running
+script must be resumable and checkpoint frequently; print progress. (This is the same
+discipline `src/selfplay.py` already used for the deprecated pipeline — carry it forward.)
+
+### Submission policy
+
+**1 submission/day** so TrueSkill has time to converge before the next one lands. Version
+tags v1, v2, ... logged in `VERSIONS.md` (repo root) with date, changes, and μ once known.
+
+**Commit and push at the end of every iterate cycle.** This repo is the project's memory
+across sessions — uncommitted work is invisible to the next session. Stage explicit paths
+(never `git add -A`); `runs/`, `submission/`, `*.tar.gz`, and loose diagnostic `.jsonl`/`.log`
+at the repo root are gitignored and never belong in a commit (see `.gitignore`).
+
 ## The Simulation agent (the technical core / critical path)
 
 - Battles run on the **`cabt` engine** (`kaggle-environments` v1.14.10). A local **SDK** with
-  identical logic is provided for training/debug/RL.
+  identical logic is provided for training/debug/search, at
+  `data/pokemon-tcg-ai-battle/sample_submission/sample_submission/cg/` (gitignored;
+  located at runtime via `src/sdk_path.py`). Import as `cg`.
 - **Turn loop:** agent receives an observation `{game logs, board state, list of legal
   options}` and returns the **index/indices of the chosen option(s)**. The engine only ever
   offers **legal** moves — you pick, you don't generate legality. Opponent's hand is hidden.
+- **Native lookahead API:** `cg.api.search_begin` / `search_step` / `search_end` /
+  `search_release` — confirmed real SDK entry points (see `docs/sdk_notes.md`), already
+  exercised by the (now-deprecated) `src/mcts.py`. The new SearchScorer agent drives these
+  directly instead of layering a trained value net on top.
 - **API docs:** https://matsuoinstitute.github.io/cabt/ (+ a page of simulator-vs-official
   rule differences).
 - **Submission:** `.tar.gz` with **`main.py` at top level** + **`deck.csv`**
   (`tar -czvf submission.tar.gz *`). Runtime path `/kaggle_simulations/agent/`.
-  Limits: ≤197.7 MiB, 2 vCPUs, 12.2 GiB RAM, 11.8 GiB HDD.
+  Limits: ≤197.7 MiB, 2 vCPUs, 12.2 GiB RAM, 11.8 GiB HDD, **5 submissions/day, latest 2
+  active**.
 - **Scoring:** N(μ, σ²), μ₀=600; win↑ / loss↓ / draw→mean; **margin of victory ignored**.
   Latest 2 submissions active. Host warns pure rule-based agents won't rank high.
+- **Deck:** `decks/crustle_wall_deck.csv` — the current top meta deck pick. (No `deck.csv`
+  exists at repo root yet; copy/rename this in at packaging time.)
 
 ### Strategy Category scoring (this category's rubric)
 - **Model Score 70%** — clarity of approach & rationale, originality, technical soundness,
@@ -69,12 +140,23 @@ The agent must be built against the **Aug 16** deadline; the Strategy writeup de
 .
 ├── CLAUDE.md
 ├── data/
+│   ├── pokemon-tcg-ai-battle/                      # engine SDK + C++ source (gitignored)
+│   │   └── sample_submission/sample_submission/cg/ # cg SDK (api.py, game.py, sim.py,
+│   │                                                #   utils.py, cg.dll/.so/.dylib)
 │   ├── pokemon-tcg-ai-battle-challenge-strategy/   # extracted competition data
 │   │   ├── EN_Card_Data.csv        # English card DB (2022 rows, 1267 unique cards)
 │   │   ├── JP_Card_Data.csv        # Japanese mirror, same schema
 │   │   ├── Card_ID List_EN.pdf     # ~131 MB card-image scans keyed to Card ID
 │   │   └── Card_ID List_JP.pdf     # ~174 MB
 │   └── pokemon-tcg-ai-battle-challenge-strategy.zip # source archive (~299 MB)
+├── decks/
+│   ├── baseline_deck.csv           # original validated Water deck
+│   └── crustle_wall_deck.csv       # current top meta pick — used for submission
+├── src/                             # see "Active foundations" / "Deprecated" below
+├── scripts/
+│   └── build_submission.py         # assembles submission.tar.gz — needs rework for
+│                                    #   the SearchScorer agent (currently loads the
+│                                    #   deprecated torch PVNet checkpoint for --mode net)
 ├── .claude/
 │   └── skills/pokemon-tcg-rules/   # PTCG rules skill (turn structure, deck building,
 │                                   #   format legality, special conditions, tournaments)
@@ -99,6 +181,8 @@ Cost, Damage, Effect Explanation`
   real file locking.
 - Read CSVs with `encoding='utf-8'` and set `PYTHONIOENCODING=utf-8` (console is cp1252;
   card names/effects contain `é`, `×`, full-width `（）`, etc.).
+- See **Hardware rules** above — they apply to every long-running script from here on,
+  not just the deprecated self-play trainer.
 
 ## Data-use constraints (competition rules)
 - Competition Data ("Pokémon Elements") may be used **only** for this competition and must
@@ -107,86 +191,48 @@ Cost, Damage, Effect Explanation`
 - Models trained on the data may not be used commercially or to regenerate Pokémon Elements
   outside the competition.
 
-## The SDK (downloaded & verified running locally, 2026-07-21)
+## Active foundations (still in use)
 
-`data/pokemon-tcg-ai-battle/` (from `pokemon-tcg-ai-battle.zip`):
-- `ptcg_engine/ptcgProgram 22/` — full **C++20 engine source** (38 `.h` + `Export.cpp`,
-  VS2022 solution) = ground-truth game logic. Competition-use-only; delete after comp.
-- `sample_submission/sample_submission/` — submission template:
-  - `main.py` — `agent(obs_dict)->list[int]`; return the 60-card **deck** when
-    `obs.select is None`, else option indices.
-  - `deck.csv` — sample 60-card deck.
-  - `cg/` — Python SDK (`api.py`, `game.py`, `sim.py`, `utils.py`) + compiled engine libs
-    (`cg.dll`, `libcg*.so`, `libcg.dylib`). Import as `cg`.
-
-**Local play API** (`cg.game`, no kaggle_environments needed):
-`battle_start(deck0, deck1) -> (obs|None, StartData)`; `battle_select(list[int]) -> obs`;
-`battle_finish()`. Loop until `obs["current"]["result"] != -1` (0/1 = winner, 2 = draw).
-`cg.api.all_card_data()` → 1267 CardData; `all_attack()` → 1556 Attack.
-
-Verified working on Windows / Python 3.14 (`cg.dll`). Smoke test:
-`data/pokemon-tcg-ai-battle/sample_submission/sample_submission/smoke_test.py`
-(run with `PYTHONIOENCODING=utf-8`).
-
-## Foundations (built & verified in a cloud session on Linux, merged here 2026-07-21)
-
-All under `src/` / `tests/`, verified against the real engine. See `docs/sdk_notes.md` for
-ground-truth SDK findings captured on Linux.
+Built and verified against the real engine; reused by the SearchScorer agent:
 - `src/carddata.py` — `load_card_index()` joins engine `all_card_data()`/`all_attack()` with
   `EN_Card_Data.csv` effect text (join key = Card ID == engine cardId).
 - `src/obs.py` — `parse_obs()` → typed, **information-hidden** GameState + classified legal
   options (opponent hand never exposed; invariant tested).
 - `src/baseline.py` — priority-heuristic agent (lethal → attach energy → evolve → best attack
-  → conditional retreat → fallback). **66–70% vs random.** Sparring partner / fallback only —
-  NOT the learned agent.
+  → conditional retreat → fallback). **66–70% vs random.** Sparring partner / fallback,
+  and the reference point the SearchScorer must beat.
 - `src/sdk_path.py` — locates the gitignored cg SDK under `data/`.
-- `decks/baseline_deck.csv` — legal 60-card Water deck (Finizen/Palafin + Totodile line +
-  Bruxish + energy), validated via `battle_start`.
-- `scripts/build_submission.py` — assembles `submission.tar.gz` (~0.48 MiB, well under the
-  197.7 MiB cap) from source; `submission/` and `*.tar.gz` are gitignored build output.
+- `src/encode.py` — visible-info-only state/option feature encoders (`STATE_DIM=342`,
+  `OPTION_DIM=24`); reusable if the optional behavior-cloned policy net (item 4 above) gets
+  built.
 
-Note: the cloud built/tested against the Linux `libcg.so`; on this Windows desktop the code
-runs against `data/…/cg/cg.dll`. Re-verify `src/` runs on Windows before relying on it here.
+## Deprecated: AlphaZero self-play pipeline (kept for reference, not deleted)
 
-## AlphaZero self-play agent (the learned agent)
+Built and self-play-tested in an earlier phase, then abandoned per the **ARCHITECTURE
+DECISION** above — repeated hardware crashes during training, plus evidence that
+search + heuristic outperforms RL+MCTS here. Left in place under `src/` but **not** part of
+the active build:
 
-Training runs in the **Python 3.12 venv** (`.venv/`); torch is training-only. Run all
-training-side code as `PYTHONPATH=src .venv/Scripts/python ...` (base 3.14 has no torch).
+`src/net.py` (torch `PVNet`), `src/net_numpy.py` (torch-free NumPy mirror),
+`src/determinize.py` (hidden-world sampling), `src/mcts.py` (determinized IS-MCTS —
+NOTE: its use of `search_begin`/`search_step` is the one part worth mining for the new
+SearchScorer agent), `src/selfplay.py`, `src/replay.py`, `src/train_step.py`,
+`src/train.py`, `src/evaluate.py`.
 
-Pipeline modules (all in `src/`):
-- `encode.py` — visible-info-only state vector (`STATE_DIM=342`) + per-option features
-  (`OPTION_DIM=24`). Info-hiding invariant tested.
-- `net.py` — tiny policy/value net (`PVNet`, ~78K params @ hidden=128). Policy scores each
-  legal option; `evaluate_np` for inference, `forward_batch` for training, `export_numpy`
-  for the torch-free submission forward.
-- `determinize.py` — samples the hidden world (opp hand/deck/prizes + own deck order) from
-  the deck distribution; engine-accepted.
-- `mcts.py` — determinized IS-MCTS over `search_begin/step`; net-valued leaves; signature-keyed
-  children; ~0.8 ms/sim, 0% truncation. `search(...)` returns the improved (visit) policy.
-- `selfplay.py` — MCTS self-play games → shaped-return training records (`outcome +
-  alpha*prize_diff`, alpha annealable); parallel across processes; npz storage.
-- `replay.py` — sliding-window replay buffer with padded/masked batch collation.
-- `train_step.py` — AlphaZero loss (policy CE vs visit dist + value MSE).
-- `evaluate.py` — win-rate ladder vs fixed reference (baseline + frozen snapshots).
-- `train.py` — **resumable orchestrator**. Artifacts under `runs/<name>/` (gitignored).
-
-Run training (16 cores, ~4 min/iter train-only, ~2.3 h for 30 iters):
-```
-PYTHONPATH=src .venv/Scripts/python src/train.py --name run2 --iters 30 \
-  --games-per-iter 32 --workers 16 --sims 32 --train-steps 300 --batch 256 \
-  --eval-every 5 --eval-sims 32 --eval-games 12 --gate-games 12
-```
-`--eval-every N` runs the (expensive) net-vs-net eval+gate only every N iters;
-every iter still self-plays + trains (non-eval iters print `(train-only)`, blank
-win-rate cols). Resume/extend with the same `--name` and a higher `--iters`;
-Ctrl-C is safe between iters. Watch eval rows in `runs/<name>/metrics.csv`
-(`wr_baseline`→~0.60, `wr_pool` rising).
+`runs/` (training artifacts, gitignored) and any `--mode net` path through
+`scripts/build_submission.py` belong to this deprecated pipeline too.
 
 ## Status / next steps
 - ✅ Both competitions understood; user entered in **both**. SDK verified on Win + Linux.
-- ✅ Foundations + full AlphaZero self-play loop built, tested, pushed to `rubin-bot/tcgsimbot`.
-- ⏭️ Run enough iterations to hit the success bar (learned agent ≥~60% vs baseline + rising
-  curve vs frozen checkpoints); then scale net/sims.
-- ⏭️ **Phase B**: extend `scripts/build_submission.py` to bundle a trained checkpoint + a
-  torch-free `net.export_numpy` forward (keep baseline fallback), then submit to
-  `pokemon-tcg-ai-battle` before Aug 16. Also: deck co-optimization (outer loop).
+- ✅ Active foundations (carddata/obs/baseline/sdk_path/encode) built, tested, pushed to
+  `rubin-bot/tcgsimbot`.
+- ✅ Architecture pivot decided: dropping the AlphaZero self-play loop in favor of a
+  SearchScorer agent (native `search_begin`/`search_step` + hand-crafted `evaluate()`).
+- ✅ SearchScorer built, crash-proof local arena built, two feature-diagnosis cycles + one
+  CMA-ES tuning pass run (see ARCHITECTURE DECISION above for the full history).
+- ✅ **v1 shipped** — `scripts/build_submission.py --mode search_scorer`, verified via
+  `scripts/verify_submission.py`'s fresh-extraction smoke test, submitted via
+  `scripts/submit.py`. See `VERSIONS.md` for the exact weights/changes and μ once scored.
+- ⏭️ **Stage 6 from here on**: watch the ladder μ, pull Kaggle episode replays for real
+  losses (richer than local `baseline`/`random`), autopsy, one fix, regression-check locally
+  (not gate on it), resubmit — 1/day per the Submission policy above.

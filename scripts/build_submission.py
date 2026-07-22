@@ -2,19 +2,26 @@
 then tars it into a submission tarball per the competition's required layout: main.py at
 top level, alongside deck.csv (tar -czvf submission.tar.gz * from inside submission/).
 
-Two modes:
-  --mode baseline (default): the rule-based agent only. Output: submission.tar.gz.
-  --mode net: the trained checkpoint (torch-free NumPy forward + determinized MCTS),
-    falling back to the baseline agent on any runtime exception. Output:
+Three modes:
+  --mode baseline: the rule-based agent only. Output: submission.tar.gz.
+  --mode search_scorer (default, v1): agents/search_scorer.py's lookahead+evaluate() agent,
+    piloting decks/crustle_wall_deck.csv, falling back to baseline internally on any
+    exception (see agents/search_scorer.py's own 3-tier fallback). Torch-free, no pip
+    dependencies at all -- see CLAUDE.md's Stage 5 notes. Output:
+    submission_search_scorer.tar.gz. Pass --weights PATH to bake in a specific tuned/fixed
+    WEIGHTS dict (JSON, agents/search_scorer.py's shape) instead of the module default.
+  --mode net: the deprecated trained checkpoint (torch-free NumPy forward + determinized
+    MCTS), falling back to the baseline agent on any runtime exception. Output:
     submission_net.tar.gz. Needs torch at BUILD time (to export the checkpoint) but the
     bundle itself stays torch-free.
 
 submission/ and submission*.tar.gz are both gitignored build output -- rerun this script
-any time the bundled src/ modules or decks/baseline_deck.csv change, rather than
-hand-editing files under submission/.
+any time the bundled src/agents modules or the deck change, rather than hand-editing files
+under submission/.
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -22,15 +29,18 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(REPO_ROOT, "src")
+AGENTS_DIR = os.path.join(REPO_ROOT, "agents")
 SDK_CG_DIR = os.path.join(
     REPO_ROOT, "data", "pokemon-tcg-ai-battle", "sample_submission", "sample_submission", "cg")
-DECK_PATH = os.path.join(REPO_ROOT, "decks", "baseline_deck.csv")
+DEFAULT_DECK_PATH = os.path.join(REPO_ROOT, "decks", "baseline_deck.csv")
+DEFAULT_SEARCH_SCORER_DECK_PATH = os.path.join(REPO_ROOT, "decks", "crustle_wall_deck.csv")
 SUBMISSION_DIR = os.path.join(REPO_ROOT, "submission")
 DEFAULT_CHECKPOINT = os.path.join(REPO_ROOT, "runs", "run2", "best.pt")
 NET_SIMS = 32  # see docs/strategy_snapshot.md: no documented per-move time limit found,
                # chosen as a safety margin (half the current self-play sims setting).
 
 BASELINE_MAIN_PY = "from baseline import agent  # noqa: F401\n"
+SEARCH_SCORER_MAIN_PY = "from search_scorer import agent  # noqa: F401\n"
 
 NET_MAIN_PY = f"""from baseline import agent as _baseline_agent, read_deck_csv
 from sdk_path import ensure_cg_importable
@@ -76,11 +86,11 @@ def agent(obs_dict: dict) -> list[int]:
 MAX_SUBMISSION_MIB = 197.7
 
 
-def build(mode: str, checkpoint: str):
+def build(mode: str, checkpoint: str, deck_path: str, weights_path: str | None = None):
     if not os.path.isdir(SDK_CG_DIR):
         sys.exit(f"cg SDK not found at {SDK_CG_DIR} -- run Phase 0's Kaggle download first.")
-    if not os.path.exists(DECK_PATH):
-        sys.exit(f"deck not found at {DECK_PATH}.")
+    if not os.path.exists(deck_path):
+        sys.exit(f"deck not found at {deck_path}.")
 
     if os.path.isdir(SUBMISSION_DIR):
         shutil.rmtree(SUBMISSION_DIR)
@@ -89,15 +99,27 @@ def build(mode: str, checkpoint: str):
     modules = ["sdk_path.py", "obs.py", "baseline.py"]
     if mode == "net":
         modules += ["encode.py", "determinize.py", "mcts.py", "net_numpy.py"]
+    elif mode == "search_scorer":
+        modules += ["determinize.py"]
     for module in modules:
         shutil.copy2(os.path.join(SRC_DIR, module), os.path.join(SUBMISSION_DIR, module))
+    if mode == "search_scorer":
+        shutil.copy2(os.path.join(AGENTS_DIR, "search_scorer.py"),
+                      os.path.join(SUBMISSION_DIR, "search_scorer.py"))
+        if weights_path:
+            with open(weights_path, encoding="utf-8") as f:
+                override = json.load(f)
+            ss_path = os.path.join(SUBMISSION_DIR, "search_scorer.py")
+            with open(ss_path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n# Baked in at package time from {os.path.basename(weights_path)}\n"
+                        f"WEIGHTS.update({json.dumps(override)})\n")
 
     for name in os.listdir(SDK_CG_DIR):
         src_path = os.path.join(SDK_CG_DIR, name)
         if os.path.isfile(src_path):
             shutil.copy2(src_path, os.path.join(SUBMISSION_DIR, "cg", name))
 
-    shutil.copy2(DECK_PATH, os.path.join(SUBMISSION_DIR, "deck.csv"))
+    shutil.copy2(deck_path, os.path.join(SUBMISSION_DIR, "deck.csv"))
 
     if mode == "net":
         if not os.path.exists(checkpoint):
@@ -107,6 +129,9 @@ def build(mode: str, checkpoint: str):
         PVNet.load(checkpoint).export_numpy(os.path.join(SUBMISSION_DIR, "model.npz"))
         main_py = NET_MAIN_PY
         tarball_path = os.path.join(REPO_ROOT, "submission_net.tar.gz")
+    elif mode == "search_scorer":
+        main_py = SEARCH_SCORER_MAIN_PY
+        tarball_path = os.path.join(REPO_ROOT, "submission_search_scorer.tar.gz")
     else:
         main_py = BASELINE_MAIN_PY
         tarball_path = os.path.join(REPO_ROOT, "submission.tar.gz")
@@ -123,11 +148,23 @@ def build(mode: str, checkpoint: str):
     print(f"Built {tarball_path}: {size_mib:.3f} MiB (limit {MAX_SUBMISSION_MIB} MiB)")
     if size_mib > MAX_SUBMISSION_MIB:
         sys.exit("submission tarball exceeds the size limit!")
+    return tarball_path
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["baseline", "net"], default="baseline")
+    ap.add_argument("--mode", choices=["baseline", "search_scorer", "net"],
+                     default="search_scorer")
     ap.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
+    ap.add_argument("--deck", default=None,
+                     help="defaults to decks/crustle_wall_deck.csv for search_scorer, "
+                          "decks/baseline_deck.csv otherwise.")
+    ap.add_argument("--weights", default=None,
+                     help="search_scorer mode only: JSON file of a WEIGHTS-shaped dict to "
+                          "bake in via WEIGHTS.update(...); omit to ship the module default.")
     args = ap.parse_args()
-    build(args.mode, args.checkpoint)
+    deck = args.deck
+    if deck is None:
+        deck = (DEFAULT_SEARCH_SCORER_DECK_PATH if args.mode == "search_scorer"
+                else DEFAULT_DECK_PATH)
+    build(args.mode, args.checkpoint, deck, args.weights)

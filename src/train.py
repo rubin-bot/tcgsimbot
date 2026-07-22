@@ -58,6 +58,13 @@ def clone(net):
     return copy.deepcopy(net).eval()
 
 
+def _default_workers():
+    """Leave a couple logical cores free for the OS/foreground instead of pegging every
+    core for hours -- a contributor to a full-machine crash observed during testing."""
+    n = os.cpu_count() or 4
+    return max(1, n - 2)
+
+
 def _next_ckpt_path(pool_dir):
     """Next unique ckpt_N.pt path, scanning existing files so the id keeps climbing even
     after pool_files (the in-memory list) gets truncated to --max-pool entries -- using
@@ -117,7 +124,10 @@ def main():
     ap.add_argument("--games-per-iter", type=int, default=24)
     ap.add_argument("--sims", type=int, default=32)
     ap.add_argument("--eval-sims", type=int, default=32)
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=_default_workers())
+    ap.add_argument("--selfplay-timeout", type=int, default=1800,
+                    help="seconds to wait for self-play generation before terminating a "
+                         "hung worker pool and continuing (games already written survive)")
     ap.add_argument("--train-steps", type=int, default=200)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--eval-games", type=int, default=16)
@@ -170,8 +180,11 @@ def main():
         alpha = alpha_at(it, args.alpha0, args.alpha_anneal_iters)
 
         # 1) self-play with the generator (best.pt)
+        print(f"iter {it:3d} | self-play starting: {args.games_per_iter} games, "
+              f"{args.workers} workers, sims={args.sims}...", flush=True)
         n = generate(run.best_path, deck, args.games_per_iter, run.data_dir,
-                     workers=args.workers, sims=args.sims, alpha=alpha, base_seed=it * 100_003)
+                     workers=args.workers, sims=args.sims, alpha=alpha, base_seed=it * 100_003,
+                     timeout=args.selfplay_timeout)
         _prune_data(run.data_dir, args.buffer_games)
 
         # 2) train the learner on recent games
@@ -214,7 +227,9 @@ def main():
 
         # persist (resumable, Ctrl-C safe between iters)
         learner.save(run.learner_path)
-        torch.save(opt.state_dict(), run.opt_path)
+        opt_tmp = run.opt_path + ".tmp"
+        torch.save(opt.state_dict(), opt_tmp)
+        os.replace(opt_tmp, run.opt_path)
         run.save_state({"iteration": it + 1, "pool": pool_files})
 
         dt = time.time() - t0

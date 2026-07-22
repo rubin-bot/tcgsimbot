@@ -17,6 +17,8 @@ Two entry points:
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -72,9 +74,13 @@ class PVNet(nn.Module):
         return priors, float(value.item())
 
     def save(self, path: str):
+        # Write-then-rename so a crash mid-save can't leave a truncated/corrupt checkpoint
+        # that a resumed run would then fail (or silently misbehave) trying to load.
+        tmp = path + ".tmp"
         torch.save({"state_dict": self.state_dict(),
                     "config": {"state_dim": self.state_dim, "option_dim": self.option_dim,
-                               "hidden": self.hidden}}, path)
+                               "hidden": self.hidden}}, tmp)
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path: str, map_location="cpu") -> "PVNet":
