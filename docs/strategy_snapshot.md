@@ -94,18 +94,57 @@ Other behavioral stats from the same sample:
   *a* consistent policy, not necessarily a *good* one yet — confidence and correctness are
   different things at this stage of training.
 
-## 4. Ladder status (Simulation category, `pokemon-tcg-ai-battle`)
+## 4. Ladder status (Simulation category, `pokemon-tcg-ai-battle`) — updated post-scoring
 
-Two submissions live as of 2026-07-22 (both count toward the "latest 2 active" scoring window):
+Two submissions live as of 2026-07-22 (both count toward the "latest 2 active" scoring window),
+checked directly on kaggle.com:
 
 | Submission | Description | Status | Score |
 |---|---|---|---|
-| `submission.tar.gz` | Rule-based priority-heuristic baseline (lethal → attach energy → evolve → best attack → conditional retreat → fallback) | COMPLETE | **243.8** (μ₀=600, so currently well below the starting mean) |
-| `submission_net.tar.gz` | This net — iteration-36 checkpoint (last promoted), torch-free NumPy forward, determinized MCTS at 32 sims/move (a safety margin vs. an undocumented per-move time budget — half the current self-play setting), falls back to the baseline agent on any exception | PENDING | not yet scored |
+| `submission.tar.gz` | Rule-based priority-heuristic baseline (lethal → attach energy → evolve → best attack → conditional retreat → fallback) | COMPLETE | **243.8** |
+| `submission_net.tar.gz` | This net — iteration-36 checkpoint (last promoted), torch-free NumPy forward, determinized MCTS at 32 sims/move, falls back to the baseline agent on any exception | COMPLETE | **451.0** |
 
-The baseline's 243.8 is a useful (if humbling) reference point: it confirms the rule-based agent
-alone is not competitive against the field, which is exactly the motivation for the learned
-agent. Whether the net does better is the open question this submission is meant to answer.
+The net **nearly doubles the baseline's score** (451.0 vs. 243.8) — a real, ladder-measured
+confirmation that the learned agent is meaningfully better than the hand-coded heuristic. Team
+rank: **#4,556 of 5,491** (searched by team name "Rubin Sahota" on the public leaderboard). Both
+scores sit below μ₀=600 (the starting mean) and well below the leaders (~1,050–1,180) — the net
+is a clear improvement over our own baseline, but not yet competitive against the field.
+
+### What the actual match replays show
+
+Opened the Kaggle-hosted PTCG visualizer (`ptcgvis.heroz.jp`) for the net's 3 most recent
+episodes at review time (vs. opponents "naoki", "nimous", "AibePC") — **all 3 were losses**.
+Reading the logs and final board states directly (not inferred):
+
+- **Every opponent deck seen runs Trainer cards; ours runs none.** naoki played Team Rocket's
+  Archer/Giovanni/Proton/Spidops + a Stadium (Team Rocket's Factory) + a Supporter (Lillie's
+  Determination) + Team Rocket's (special) Energy. nimous's active was a **260 HP Crustle**
+  behind a Stadium (Battle Cage). AibePC had two Tool cards (Premium Power Pro) and an Item
+  (Dusk Ball) in hand. Every single one of these card types is structurally absent from
+  `decks/baseline_deck.csv` (confirmed zero Trainer cards, §3) — the agent is losing partly
+  because **the deck it's holding is mechanically thinner than what real opponents bring**, not
+  only because of play quality.
+- **The live search's hidden-information sampling is silently wrong against real opponents.**
+  `src/determinize.py`'s `sample_determinization` defaults `opp_deck_list` to **our own deck
+  list** when the caller doesn't pass one — and `scripts/build_submission.py`'s net-mode
+  `main.py` calls `mcts.search(obs_dict, net, _DECK, ...)` with only our deck. So every MCTS
+  simulation during a live match guesses the opponent's hidden hand/deck/prizes by sampling
+  from **our Water-deck card pool**, when the real opponent might be running Team Rocket's
+  Giovanni or a 260 HP Crustle wall. The *visible* legal options the engine offers are always
+  correct (the engine enforces those, not us) — but the simulated hidden-card guesses that
+  drive the search's lookahead are built on a false premise against any non-mirror opponent.
+  This is a concrete, fixable bug in the live-inference path (self-play training itself is
+  unaffected, since self-play *is* a genuine mirror match).
+- **One loss (vs. AibePC) ended with both sides at Prize 6/Deck 47/Discard 0** — i.e. essentially
+  no cards had been played or prizes taken by either side when the game ended. That's not a
+  "we got out-played" pattern, that's consistent with a stall or turn/step-limit ruling. Worth
+  investigating directly (e.g. instrument `main.py`'s `agent()` for wall-clock per decision on
+  the actual Kaggle sandbox) rather than assuming it's a strategy problem.
+
+None of this contradicts §3's behavioral read (development/attrition-oriented, rarely retreats,
+~80% decisive) — it adds *why that might be losing*: a patient, board-building style is a much
+weaker plan when the opponent's deck has Trainer-card acceleration and bigger walls, and ours
+has neither the cards nor (currently) an accurate read of what the opponent is actually holding.
 
 ## 5. Honest limitations / open questions
 
@@ -123,12 +162,20 @@ agent. Whether the net does better is the open question this submission is meant
 
 ## 6. Next steps
 
+Reordered given the ladder evidence in §4 — the two concrete, diagnosed gaps first:
+
+- **Fix `sample_determinization`'s mirror assumption for live play.** The submission's `main.py`
+  should pass a *non-mirror* prior for the opponent once real opponent cards become visible
+  (their played Pokémon/discard are genuinely observable — only their hand/deck order/prizes
+  stay hidden), instead of silently defaulting to our own deck's distribution. At minimum,
+  sampling the unseen opponent slots from a generic/uniform card pool would be more honest than
+  assuming mirror; better still, build the guess from whatever of their cards are already
+  visible on board.
+- **Deck co-optimization**: the current deck has zero Trainer cards, which real opponents are
+  clearly exploiting (§4). Build a deck with Items/Supporters/Tools once the pipeline is stable
+  — likely higher-leverage than more training iterations on the current deck alone.
+- Investigate the stalled/untouched-prizes loss pattern (§4) — confirm it's not a timing or
+  exception issue in the live sandbox before assuming it's a strategy gap.
 - Resume training from iteration 40 (paused, not broken) and watch whether the tuned
   sims=64/games=48 setting produces a cleaner upward win-rate trend over the next several
   evaluated iterations.
-- Once `submission_net.tar.gz` gets a score, compare it against the baseline's 243.8 as the
-  first real signal of whether the learned agent is competitive.
-- **Deck co-optimization** (already flagged in CLAUDE.md's next steps): the current training
-  deck has no Trainer cards at all, capping the agent's strategic ceiling regardless of how
-  well training goes. Worth building a deck with Items/Supporters/Tools once the pipeline is
-  stable, so the net has those levers to learn with.
