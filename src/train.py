@@ -133,10 +133,15 @@ def main():
     ap.add_argument("--snapshot-every", type=int, default=3)
     ap.add_argument("--max-pool", type=int, default=4)
     ap.add_argument("--deck", default=os.path.join(REPO, "decks", "baseline_deck.csv"))
+    ap.add_argument("--sanity-deck", default=None,
+                    help="optional second deck (different archetype) for a non-mirror eval "
+                         "opponent, so the win-rate signal can't be fooled by a policy that "
+                         "only works against a mirror of its own deck")
     args = ap.parse_args()
 
     run = Run(os.path.join(REPO, "runs", args.name), args.hidden)
     deck = load_deck(args.deck)
+    sanity_deck = load_deck(args.sanity_deck) if args.sanity_deck else None
 
     learner = PVNet(hidden=args.hidden)
     opt = torch.optim.Adam(learner.parameters(), lr=args.lr)
@@ -176,21 +181,26 @@ def main():
         # 3+4) eval vs fixed reference + gated promotion -- PERIODIC (net-vs-net games are the
         # main cost and are pure measurement, so most iters skip them and just keep learning).
         do_eval = (it % args.eval_every == 0) or (it == args.iters - 1)
-        wr_b_s = wr_p_s = gate_s = ""
+        wr_b_s = wr_p_s = gate_s = wr_s_s = ""
         promoted = False
         if do_eval:
             opponents = {"baseline": baseline_agent}
+            opponent_decks = {}
             for i, pf in enumerate(pool_files):
                 opponents[f"ckpt{i}"] = make_net_agent(PVNet.load(pf), deck, sims=args.eval_sims)
+            if sanity_deck is not None:
+                opponents["sanity"] = baseline_agent
+                opponent_decks["sanity"] = sanity_deck
             ev = evaluate(learner, opponents, deck, n_games=args.eval_games, sims=args.eval_sims,
-                          base_seed=it * 7 + 1)
+                          base_seed=it * 7 + 1, opponent_decks=opponent_decks)
             wr_baseline = ev["baseline"]
             pool_wrs = [ev[k] for k in ev if k.startswith("ckpt")]
             wr_pool = sum(pool_wrs) / len(pool_wrs)
+            wr_sanity = ev.get("sanity")
             gen = PVNet.load(run.best_path)
             gate = win_rate(make_net_agent(learner, deck, sims=args.eval_sims),
                             make_net_agent(gen, deck, sims=args.eval_sims),
-                            deck, args.gate_games, base_seed=it * 13 + 5)
+                            deck, deck, args.gate_games, base_seed=it * 13 + 5)
             promoted = gate >= args.gate_thresh
             if promoted:                                  # promote learner -> generator + snapshot
                 learner.save(run.best_path)
@@ -200,6 +210,7 @@ def main():
                 if len(pool_files) > args.max_pool:
                     pool_files = [pool_files[0]] + pool_files[-(args.max_pool - 1):]
             wr_b_s, wr_p_s, gate_s = f"{wr_baseline:.3f}", f"{wr_pool:.3f}", f"{gate:.3f}"
+            wr_s_s = f"{wr_sanity:.3f}" if wr_sanity is not None else ""
 
         # persist (resumable, Ctrl-C safe between iters)
         learner.save(run.learner_path)
@@ -209,10 +220,10 @@ def main():
         dt = time.time() - t0
         run.log_metrics(
             [it, f"{alpha:.3f}", n, f"{loss:.3f}", f"{pl:.3f}", f"{vl:.3f}",
-             wr_b_s, wr_p_s, gate_s, int(promoted), f"{dt:.1f}"],
+             wr_b_s, wr_p_s, wr_s_s, gate_s, int(promoted), f"{dt:.1f}"],
             ["iter", "alpha", "games", "loss", "policy", "value",
-             "wr_baseline", "wr_pool", "gate", "promoted", "sec"])
-        evtxt = (f"wr_base={wr_b_s} wr_pool={wr_p_s} gate={gate_s} "
+             "wr_baseline", "wr_pool", "wr_sanity", "gate", "promoted", "sec"])
+        evtxt = (f"wr_base={wr_b_s} wr_pool={wr_p_s} wr_sanity={wr_s_s} gate={gate_s} "
                  f"{'PROMOTED' if promoted else ''}") if do_eval else "(train-only)"
         print(f"iter {it:3d} | a={alpha:.2f} games={n} loss={loss:.3f} {evtxt} | {dt:.0f}s")
 

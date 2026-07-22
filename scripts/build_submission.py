@@ -33,6 +33,9 @@ NET_SIMS = 32  # see docs/strategy_snapshot.md: no documented per-move time limi
 BASELINE_MAIN_PY = "from baseline import agent  # noqa: F401\n"
 
 NET_MAIN_PY = f"""from baseline import agent as _baseline_agent, read_deck_csv
+from sdk_path import ensure_cg_importable
+
+ensure_cg_importable()
 
 _DECK = read_deck_csv()
 _SIMS = {NET_SIMS}
@@ -40,7 +43,17 @@ _SIMS = {NET_SIMS}
 try:
     from net_numpy import NumpyPVNet
     from mcts import search
+    from cg.api import all_card_data
     _net = NumpyPVNet.load("model.npz")
+    # Real opponents run their own deck, not ours -- sample_determinization defaults the
+    # opponent's hidden cards to OUR deck list when no opp_deck_list is given, which is only
+    # correct for a mirror match. Live play is never a mirror match, so seed the hidden-world
+    # guess from the full card pool instead (a diverse, non-mirror prior) rather than silently
+    # assuming they're playing our deck. Basic Energy (ids 1-8) is over-represented in real
+    # decks relative to its 8-in-~1100 share of the raw card pool, so weight it up a bit rather
+    # than leaving it diluted to near-zero.
+    _BASIC_ENERGY_IDS = list(range(1, 9))
+    _OPP_POOL = [c.cardId for c in all_card_data()] + _BASIC_ENERGY_IDS * 15
 except Exception:
     _net = None
 
@@ -48,7 +61,8 @@ except Exception:
 def agent(obs_dict: dict) -> list[int]:
     if _net is not None:
         try:
-            out = search(obs_dict, _net, _DECK, sims=_SIMS, temperature=0.0, add_noise=False)
+            out = search(obs_dict, _net, _DECK, sims=_SIMS, temperature=0.0, add_noise=False,
+                         opp_deck_list=_OPP_POOL)
             if out is None:
                 return list(_DECK)
             _, _, index_list, _ = out

@@ -136,11 +136,11 @@ def _advance_to_branch(sid, cur, depth):
     return cur, gs, sel, result, depth
 
 
-def _simulate(root: Node, root_observation, root_gs, deck_list, net):
+def _simulate(root: Node, root_observation, root_gs, deck_list, net, opp_deck_list=None):
     """One determinized rollout. `root` is already expanded from the real selection, so the
     tree node always corresponds to the current branching decision (empty selections are
     absorbed into the edges via _advance_to_branch)."""
-    world = sample_determinization(root_gs, deck_list)
+    world = sample_determinization(root_gs, deck_list, opp_deck_list)
     try:
         ss = search_begin(
             root_observation, world["your_deck"], world["your_prize"],
@@ -202,8 +202,14 @@ def _simulate(root: Node, root_observation, root_gs, deck_list, net):
 
 
 def search(root_obs_dict: dict, net, deck_list, sims: int = 50,
-           temperature: float = 1.0, add_noise: bool = False):
+           temperature: float = 1.0, add_noise: bool = False, opp_deck_list=None):
     """Run `sims` determinized simulations from the current real decision.
+
+    `opp_deck_list` seeds the hidden-world guess for the OPPONENT's unseen cards
+    (see determinize.sample_determinization). Defaults to None, which
+    sample_determinization resolves to the mirror-match assumption (`deck_list`) --
+    correct for self-play (it genuinely is a mirror match) but wrong for live play
+    against an unknown real opponent, where the caller should pass a non-mirror prior.
 
     Returns (policy, choice, index_list, selection):
       * policy      -- np.ndarray over the root options (aligned to selection.options order),
@@ -226,7 +232,7 @@ def search(root_obs_dict: dict, net, deck_list, sims: int = 50,
         _add_root_noise(root)
 
     for _ in range(sims):
-        _simulate(root, root_observation, root_gs, deck_list, net)
+        _simulate(root, root_observation, root_gs, deck_list, net, opp_deck_list)
 
     visits = root.N.copy()
     if visits.sum() <= 0:
