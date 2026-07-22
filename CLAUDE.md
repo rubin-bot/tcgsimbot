@@ -26,8 +26,9 @@ Team composition must be **identical** across both divisions (rule 2.1.c). Strat
 Simulation entry (not vice-versa). Strategy is a hackathon = **one submission per team**;
 Simulation allows **5 submissions/day**. Max team size 5.
 
-> ⚠️ As of 2026-07-21 the user is entered in **Strategy but NOT Simulation**
-> (`userHasEntered: False`). Must join Simulation before its entry deadline **2026-08-09**.
+> ✅ As of 2026-07-22 the user is entered in **both Strategy and Simulation**
+> (`userHasEntered: True` for both). First Simulation submission (baseline rule-based
+> agent) made 2026-07-22.
 
 ## The Simulation agent (the technical core / critical path)
 
