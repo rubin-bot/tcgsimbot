@@ -116,6 +116,34 @@ at the repo root are gitignored and never belong in a commit (see `.gitignore`).
 - **Deck:** `decks/crustle_wall_deck.csv` — the current top meta deck pick. (No `deck.csv`
   exists at repo root yet; copy/rename this in at packaging time.)
 
+### SearchScorer's tie-break ordering (`agents/search_scorer.py::_break_ties`)
+
+When multiple root options score within `_TIE_EPS_REL` (near-exact float equality — these are
+usually genuinely-equal reachable positions under the 2-ply search, not noise), ties are broken
+in this order, most-preferred first:
+
+1. **Option kind** (`_TIE_BREAK_PRIORITY`): attack > evolve > attach/energy > retreat >
+   play/ability > everything else > end.
+2. **Within the same kind, attacker-pipeline membership**: prefer a target that's part of the
+   attacker's evolution pipeline (`ATTACKER_PIPELINE_IDS`, walked from the deck's designated
+   attacker card's `evolvesFrom` chain at import time — **not** a hardcoded per-deck tuple; for
+   `decks/crustle_wall_deck.csv` this resolves to Crustle + its pre-evolution Dwebble) over any
+   other target. A pre-evolution counts as the attacker it becomes — energy attached to it
+   persists through evolution.
+3. **Within the pipeline, proximity to `ATTACKER_ENERGY_COST`**: prefer whichever pipeline
+   member still needs energy and needs the *least* of it (closest to attack-ready). A pipeline
+   member that's *already* at cost is ranked **worse** than one still building — attaching more
+   there doesn't help, and `evaluate()`'s own `wasted_energy` feature can't always catch this
+   case itself (it's a `min`-across-pipeline feature, blind whenever any other pipeline member
+   is already fully powered — see `docs/tie_break_v2_2026-07-23.md`).
+4. Otherwise, the engine's own option-list order (last resort, unchanged from before).
+
+Landed as v2 (2026-07-23) after the v1-era tie-break only recognized an *already-evolved*,
+under-cost attacker (Crustle specifically) — it never credited an unpowered pre-evolution at
+all, and among multiple recognized targets with different energy levels it couldn't rank by
+proximity, only by engine list order. `evaluate()` itself is untouched by this fix; it only
+changes which of several *already-equally-scored* options gets picked.
+
 ### Strategy Category scoring (this category's rubric)
 - **Model Score 70%** — clarity of approach & rationale, originality, technical soundness,
   consistency across repeated matches, robustness (not reliant on lucky states/matchups),

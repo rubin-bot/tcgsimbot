@@ -53,6 +53,30 @@ HEROS_CAPE_ID = 1159
 FOREST_OF_VITALITY_ID = 1261
 ATTACKER_ENERGY_COST = 3  # Superb Scissors: {G} + 2 colorless
 
+
+def _attacker_pipeline_ids() -> frozenset[int]:
+    """Walks CRUSTLE_ID's card-data evolution chain backward (evolvesFrom is a NAME string,
+    per cg.api.CardData, matched back to an id via _CARD) rather than hardcoding a second
+    (CRUSTLE_ID, DWEBBLE_ID)-style tuple independent of evaluate()'s existing one -- general
+    mechanism, computed once at import like _CARD/_ATTACK. For this deck
+    (decks/crustle_wall_deck.csv has exactly one Pokemon line, 4x Dwebble + 4x Crustle,
+    everything else is Trainers/Energy -- confirmed 2026-07-23) this resolves to exactly
+    {345, 344}, the same ids evaluate()'s turns_to_power/wasted_energy already use."""
+    ids = {CRUSTLE_ID}
+    seen_names: set[str] = set()
+    current = _CARD.get(CRUSTLE_ID)
+    while current is not None and current.evolvesFrom and current.evolvesFrom not in seen_names:
+        seen_names.add(current.evolvesFrom)
+        parent = next((c for c in _CARD.values() if c.name == current.evolvesFrom), None)
+        if parent is None:
+            break
+        ids.add(parent.cardId)
+        current = parent
+    return frozenset(ids)
+
+
+ATTACKER_PIPELINE_IDS = _attacker_pipeline_ids()
+
 MAX_ROOT_OPTIONS = 30  # beyond this, defer to the cheap baseline for that decision
 # tools/loss_review.py on 114 real losses vs. baseline found 86.5% of searched decisions had
 # their top-2 options tied within 5%: at MAX_OUR_PLIES=2, e.g. "play a Supporter, then attack"
@@ -492,33 +516,47 @@ def _score_option(world: dict, root_observation, sel: Selection, lo, root_your_i
         search_release(sid)
 
 
-def _unpowered_crustle_serials(game_state: GameState) -> set[int]:
-    mons = list(game_state.you.bench)
-    if game_state.you.active is not None:
-        mons.append(game_state.you.active)
-    return {m.serial for m in mons
-            if m.card_id == CRUSTLE_ID and len(m.energies) < ATTACKER_ENERGY_COST}
+def _pipeline_energy_deficit(pv) -> int | None:
+    """None if pv isn't part of the attacker's evolution pipeline (ATTACKER_PIPELINE_IDS) at
+    all; otherwise how much more energy it needs to reach ATTACKER_ENERGY_COST (0 = already at
+    cost). Pre-evolutions (Dwebble) count as the attacker they become -- energy attached to
+    them persists through evolution, same reasoning evaluate()'s turns_to_power/wasted_energy
+    already use for SCORING, now also applied at TIE-BREAK time, which is where real losses
+    were found (docs/near_tie_measurement_2026-07-23.md: 14/20 real starvation losses were
+    "tied-and-lost" -- the old tie-break only recognized an already-evolved, under-3-energy
+    Crustle, so a) it never credited an unpowered Dwebble at all, and b) among two recognized
+    Crustles with different deficits it couldn't rank by proximity, only by engine list order
+    -- confirmed against 3 real ladder states in tests/test_tie_break.py)."""
+    if pv is None or pv.card_id not in ATTACKER_PIPELINE_IDS:
+        return None
+    return max(0, ATTACKER_ENERGY_COST - len(pv.energies))
 
 
-def _tie_break_key(lo, unpowered_serials: set[int]) -> tuple[int, int]:
+def _tie_break_key(lo) -> tuple[int, int, int]:
     base = _TIE_BREAK_PRIORITY.get(lo.kind, 8)
-    targets_unpowered_attacker = 0 if (lo.target is not None
-                                        and lo.target.serial in unpowered_serials) else 1
-    return (base, targets_unpowered_attacker)
+    deficit = _pipeline_energy_deficit(lo.target)
+    if deficit is None:
+        pipeline_rank, proximity = 2, 0           # not in the pipeline at all
+    elif deficit == 0:
+        pipeline_rank, proximity = 1, 0           # in the pipeline but already fully powered --
+    else:                                         # this attachment wouldn't help it further
+        pipeline_rank, proximity = 0, deficit     # still needs energy -- smaller deficit (closer
+    return (base, pipeline_rank, proximity)        # to powered) sorts first
 
 
-def _break_ties(selection: Selection, scores: dict[int, float], best_score: float,
-                 game_state: GameState):
-    """Among options within _TIE_EPS_REL of best_score, prefer by _TIE_BREAK_PRIORITY instead
-    of the arbitrary engine option-list order (see MAX_OUR_PLIES's comment for why this
-    matters -- real losses showed the search legitimately ties many options)."""
+def _break_ties(selection: Selection, scores: dict[int, float], best_score: float):
+    """Among options within _TIE_EPS_REL of best_score, prefer by _TIE_BREAK_PRIORITY (option
+    kind), then by whether/how-close the target is to completing the attacker's evolution
+    pipeline, instead of the arbitrary engine option-list order (see MAX_OUR_PLIES's comment
+    for why this matters -- real losses showed the search legitimately ties many options).
+    No longer needs game_state -- pipeline membership is purely a function of each option's own
+    target (see _pipeline_energy_deficit)."""
     eps = _TIE_EPS_REL * max(abs(best_score), 1.0)
     tied = [lo for lo in selection.options
             if lo.index in scores and abs(scores[lo.index] - best_score) <= eps]
     if len(tied) <= 1:
         return tied[0] if tied else None
-    unpowered = _unpowered_crustle_serials(game_state)
-    return min(tied, key=lambda lo: _tie_break_key(lo, unpowered))
+    return min(tied, key=_tie_break_key)
 
 
 def _trace_options(selection: Selection, scores: dict[int, float] | None,
@@ -600,7 +638,7 @@ def choose_action(game_state: GameState, selection: Selection, obs_dict: dict,
         emit("search_rejected", chosen_index=result[0] if result else None)
         return result
 
-    tie_broken = _break_ties(selection, scores, best_score, game_state)
+    tie_broken = _break_ties(selection, scores, best_score)
     if tie_broken is not None:
         best_lo = tie_broken
 
