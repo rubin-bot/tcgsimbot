@@ -47,7 +47,7 @@ directly targeting a diagnosed gap — see below.
 **Local reference numbers for the shipped (tuned) weights** (from the bake-off, n=150/100):
 vs. `baseline` 46.0% (69/150), vs. `random` 100% (100/100).
 
-**μ (Kaggle ladder):** 573.3 (as of 2026-07-23 07:02Z, submitted 2026-07-22 17:47:52.847000 -- may still be settling; re-run tools/measure.py to refresh)
+**μ (Kaggle ladder):** 568.6 (as of 2026-07-23 07:41Z, submitted 2026-07-22 17:47:52.847000 -- may still be settling; re-run tools/measure.py to refresh)
 
 **Honest open question for Stage 6:** local win rate vs. two fixed opponents (`baseline`,
 `random`) never moved much across three real, evidenced fixes, while measured *behavior*

@@ -250,18 +250,31 @@ commands; this is just the pointer. Still 1 submission/day, still ≤2 local sim
 - ✅ **Stage 6 tooling built**: `tools/measure.py`, `tools/autopsy.py`,
   `scripts/build_kernel_bakeoff.py`, `ITERATE.md`, `.claude/skills/iterate/`. See the
   "Iterate workflow" section above.
-- ✅ **First real ladder MEASURE+AUTOPSY cycle run (2026-07-23)** — `tools/measure.py`
+- ✅ **First real ladder MEASURE+AUTOPSY cycle run (2026-07-23, AM)** — `tools/measure.py`
   extended with leaderboard rank fetch (fixed a UTF-8 BOM bug that silently broke the `Rank`
   column lookup), a persistent `runs/mu_history.jsonl` trajectory log, and multi-day episode
-  scanning; new `tools/ladder_report.py` orchestrates PARSE+AUTOPSY+REPORT.
-  **Result: μ=573.3, rank≈3616/5552, but 0 of our episodes found** in the one dataset
-  available so far (`...-2026-07-22`) — v1 was only live ~6h that day and likely just wasn't
-  sampled into that day's ~4,600-episode dump; re-check once more days publish. Full report
-  (with a local-evidence fallback analysis) at `docs/ladder_autopsy_2026-07-23.md`. Top FIX
-  candidate identified from local data (pending ladder confirmation): a tie-break issue on
-  attacker-starvation decisions — 14/32 local starvation cases were "tied and lost" and the
-  overall near-tie rate is 87.6%.
-- ⏭️ **Stage 6 from here on**: re-run `tools/measure.py` + `tools/ladder_report.py` once more
-  ladder data exists; once real losses confirm (or refute) the tie-break hypothesis above,
-  implement one fix, prove it on a Kaggle kernel (`scripts/build_kernel_bakeoff.py`, 400+
-  games), resubmit — 1/day per the Submission policy above.
+  scanning; new `tools/ladder_report.py` orchestrates PARSE+AUTOPSY+REPORT. That run's episode
+  scan (the bulk daily-dataset dump) found 0 of our episodes and treated it as inconclusive.
+- ✅ **Submission/ladder audit (2026-07-23, PM)** — verified the AM cycle's "0 episodes" via
+  the Kaggle API directly instead of trusting the inconclusive read: both active submissions
+  are `SubmissionStatus.COMPLETE`, no errors; **v1 has actually played 45 real ladder games**
+  (net checkpoint: 30) that the bulk daily dataset simply didn't happen to include (confirmed
+  a genuine subsample — 9/9 of our real episode IDs got real 404s from that dataset). Added
+  `tools/measure.py::fetch_our_episodes_via_submission_api()` (the `kaggle competitions
+  episodes <id>` + `replay <id>` API) as the new primary episode-discovery path — direct,
+  complete, no 700MB+/day download; old bulk scan kept as an opt-in `--also-bulk-scan`
+  fallback. Also fixed a latent `src/carddata.py` bug (`card_type` stored as raw int, not
+  `CardType`) that the newly-unblocked ladder pipeline was the first thing to ever exercise.
+  Full writeup: `docs/submission_ladder_audit_2026-07-23.md`.
+  **Real record so far: 75 games, 34W/41L (45.3%)**, μ=568.6, rank≈3664/5552 — regenerated
+  `docs/ladder_autopsy_2026-07-23.md` now has real numbers instead of the AM cycle's fallback
+  section. Notable: **ladder attack-decline rate is 77.6% (554/714) vs. 9.5% locally** — a
+  large real/local behavior gap worth prioritizing next. Caveat: the 75-game record blends
+  both currently-active submissions (v1 + the older net checkpoint) since episode parsing
+  matches on team name only, not submission ID — see the audit doc's Limitations section.
+- ⏭️ **Stage 6 from here on**: real ladder data now exists for the first time — the
+  attacker-starvation tie-break hypothesis from the AM cycle can finally be checked against it
+  (`tools/autopsy.py --source ladder`, section (d)), and the large attack-decline gap above is
+  worth its own look. Implement one fix, prove it on a Kaggle kernel
+  (`scripts/build_kernel_bakeoff.py`, 400+ games), resubmit — 1/day per the Submission policy
+  above. No agent/weights changes were made in the 2026-07-23 PM audit itself.
