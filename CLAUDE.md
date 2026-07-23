@@ -250,6 +250,18 @@ commands; this is just the pointer. Still 1 submission/day, still ≤2 local sim
 - ✅ **Stage 6 tooling built**: `tools/measure.py`, `tools/autopsy.py`,
   `scripts/build_kernel_bakeoff.py`, `ITERATE.md`, `.claude/skills/iterate/`. See the
   "Iterate workflow" section above.
-- ⏭️ **Stage 6 from here on**: watch the ladder μ, pull Kaggle episode replays for real
-  losses (richer than local `baseline`/`random`), autopsy, one fix proven on a Kaggle kernel,
-  resubmit — 1/day per the Submission policy above.
+- ✅ **First real ladder MEASURE+AUTOPSY cycle run (2026-07-23)** — `tools/measure.py`
+  extended with leaderboard rank fetch (fixed a UTF-8 BOM bug that silently broke the `Rank`
+  column lookup), a persistent `runs/mu_history.jsonl` trajectory log, and multi-day episode
+  scanning; new `tools/ladder_report.py` orchestrates PARSE+AUTOPSY+REPORT.
+  **Result: μ=573.3, rank≈3616/5552, but 0 of our episodes found** in the one dataset
+  available so far (`...-2026-07-22`) — v1 was only live ~6h that day and likely just wasn't
+  sampled into that day's ~4,600-episode dump; re-check once more days publish. Full report
+  (with a local-evidence fallback analysis) at `docs/ladder_autopsy_2026-07-23.md`. Top FIX
+  candidate identified from local data (pending ladder confirmation): a tie-break issue on
+  attacker-starvation decisions — 14/32 local starvation cases were "tied and lost" and the
+  overall near-tie rate is 87.6%.
+- ⏭️ **Stage 6 from here on**: re-run `tools/measure.py` + `tools/ladder_report.py` once more
+  ladder data exists; once real losses confirm (or refute) the tie-break hypothesis above,
+  implement one fix, prove it on a Kaggle kernel (`scripts/build_kernel_bakeoff.py`, 400+
+  games), resubmit — 1/day per the Submission policy above.
