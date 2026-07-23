@@ -9,10 +9,15 @@ tooling don't each carry their own copy.
 
 from __future__ import annotations
 
+import csv
+import glob
 import importlib.util
+import io
+import os
 import shutil
 import subprocess
 import sys
+import zipfile
 
 SIMULATION_COMPETITION = "pokemon-tcg-ai-battle"
 
@@ -38,6 +43,40 @@ def find_kaggle_python() -> list[str]:
 
 def kaggle_cmd(*args: str) -> list[str]:
     return find_kaggle_python() + ["-m", "kaggle", *args]
+
+
+def fetch_leaderboard_rows(competition: str = SIMULATION_COMPETITION,
+                            download_dir: str | None = None) -> list[dict]:
+    """Downloads the full public leaderboard CSV (a small zip -- ~170KB for this competition's
+    ~5500 teams, nothing like the 700MB+ episode dumps) and returns every row as a dict
+    (Rank/TeamId/TeamName/LastSubmissionDate/Score/SubmissionCount/TeamMemberUserNames).
+    Shared by tools/measure.py (our own row, for rank) and tools/ladder_report.py (every row,
+    to look up opponents' scores)."""
+    if download_dir is None:
+        download_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                     "runs", "_leaderboard_download")
+    os.makedirs(download_dir, exist_ok=True)
+    for f in glob.glob(os.path.join(download_dir, "*")):
+        os.remove(f)
+    subprocess.run(
+        kaggle_cmd("competitions", "leaderboard", "-c", competition, "--csv", "--download",
+                   "-p", download_dir),
+        check=True, capture_output=True,
+    )
+    zip_paths = glob.glob(os.path.join(download_dir, "*.zip"))
+    if not zip_paths:
+        return []
+    with zipfile.ZipFile(zip_paths[0]) as zf:
+        csv_name = zf.namelist()[0]
+        with zf.open(csv_name) as f:
+            # utf-8-sig, not utf-8: this CSV ships with a UTF-8 BOM, which otherwise leaks
+            # into the first header cell (key becomes '﻿Rank', not 'Rank') and silently
+            # breaks any row.get("Rank") lookup -- confirmed against a real download.
+            text = io.TextIOWrapper(f, encoding="utf-8-sig")
+            rows = list(csv.DictReader(text))
+    for f in glob.glob(os.path.join(download_dir, "*")):
+        os.remove(f)
+    return rows
 
 
 def get_kaggle_username() -> str:

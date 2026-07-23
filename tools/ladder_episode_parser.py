@@ -14,6 +14,17 @@ ladder-only archetype checks in tools/autopsy.py.
 
 score/features are always None here: those come from agents/search_scorer.py's own trace_fn
 instrumentation, and Kaggle never records them -- see tools/autopsy.py's skip_local_only flag.
+Recomputing real evaluate() scores retroactively from a replay isn't soundly possible either:
+faithfully replaying an episode through the live cg engine to get a matching session would need
+the ORIGINAL shuffle/draw RNG seed, which Kaggle never exposes -- a fresh battle_start()
+reshuffles differently, so recorded action *indices* would no longer point at the same options.
+So ladder-side "why" analysis stays qualitative (board-state fields only), never a fabricated
+recomputed score.
+
+Also surfaces terminal-state fields (final deck counts, prizes remaining, whether our side has
+any Pokemon left, and the episode's own per-seat status) for tools/ladder_report.py's
+win-condition taxonomy -- the real 3 PTCG loss conditions (deck-out, all-prizes-taken,
+no-Pokemon-in-play) plus a timeout/illegal-action catch-all from `episode["statuses"]`.
 """
 
 from __future__ import annotations
@@ -28,6 +39,18 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 from obs import parse_obs  # noqa: E402
 from kaggle_common import OUR_TEAM_NAME  # noqa: E402
+
+
+class LadderParseError(Exception):
+    """Raised when a file that IS one of our extracted episodes doesn't match the expected
+    schema -- distinct from parse_episode_file returning None, which means the file genuinely
+    isn't one of our games (normal, not an error). Callers should catch this, count it, and
+    report it rather than let a format surprise silently vanish."""
+
+    def __init__(self, path: str, reason: str):
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path}: {reason}")
 
 
 def find_our_seat(info: dict, our_team_name: str = OUR_TEAM_NAME) -> int | None:
@@ -67,17 +90,45 @@ def _opponent_deck_ids(episode: dict, our_seat: int) -> list[int]:
         return []
 
 
-def parse_episode_file(path: str, our_team_name: str = OUR_TEAM_NAME) -> dict | None:
-    """Returns None if this episode doesn't involve our team (shouldn't happen if
-    tools/measure.py filtered correctly before extracting episodes, but checked defensively
-    rather than assumed)."""
-    with open(path, encoding="utf-8") as f:
-        episode = json.load(f)
+def _final_player_states(episode: dict, our_seat: int) -> tuple[dict | None, dict | None]:
+    """Walks backward to the last step whose observation has a non-null `current` (the
+    terminal board state) and returns (our_raw_player_dict, opp_raw_player_dict). deckCount
+    and prize-array length are public information for both sides per PTCG rules (same
+    invariant src/obs.py relies on), so these are genuinely visible, not inferred."""
+    opp_seat = 1 - our_seat
+    for step in reversed(episode["steps"]):
+        obs = step[our_seat].get("observation") or {}
+        cur = obs.get("current")
+        if cur is not None:
+            players = cur.get("players")
+            if players and len(players) > max(our_seat, opp_seat):
+                return players[our_seat], players[opp_seat]
+    return None, None
 
-    our_seat = find_our_seat(episode.get("info", {}), our_team_name)
-    if our_seat is None:
-        return None
 
+def _terminal_state(episode: dict, our_seat: int) -> dict:
+    our_final, opp_final = _final_player_states(episode, our_seat)
+    statuses = episode.get("statuses") or []
+    our_status = statuses[our_seat] if our_seat < len(statuses) else None
+
+    result = {
+        "our_status": our_status,
+        "our_deck_count": None, "opp_deck_count": None,
+        "our_prizes_remaining": None, "opp_prizes_remaining": None,
+        "our_active_present": None, "our_bench_count": None,
+    }
+    if our_final is not None:
+        result["our_deck_count"] = our_final.get("deckCount")
+        result["our_prizes_remaining"] = len(our_final.get("prize") or [])
+        result["our_active_present"] = bool(our_final.get("active"))
+        result["our_bench_count"] = len(our_final.get("bench") or [])
+    if opp_final is not None:
+        result["opp_deck_count"] = opp_final.get("deckCount")
+        result["opp_prizes_remaining"] = len(opp_final.get("prize") or [])
+    return result
+
+
+def _parse_matched_episode(episode: dict, our_seat: int, path: str) -> dict:
     rewards = episode.get("rewards") or [0, 0]
     our_reward = rewards[our_seat] if our_seat < len(rewards) else 0
     if our_reward > 0:
@@ -114,4 +165,35 @@ def parse_episode_file(path: str, our_team_name: str = OUR_TEAM_NAME) -> dict | 
         "outcome": outcome,
         "decisions": decisions,
         "opponent_card_ids": _opponent_deck_ids(episode, our_seat),
+        "opponent_team_name": episode.get("info", {}).get("TeamNames", [None, None])[1 - our_seat],
+        "terminal": _terminal_state(episode, our_seat),
     }
+
+
+def parse_episode_file(path: str, our_team_name: str = OUR_TEAM_NAME) -> dict | None:
+    """Returns None if this episode genuinely doesn't involve our team (shouldn't happen if
+    tools/measure.py filtered correctly before extracting episodes, but checked defensively
+    rather than assumed) -- that is the normal, non-error path. Raises LadderParseError for
+    anything that doesn't match the expected schema once we ARE looking at one of our matched
+    episodes, so a format surprise is visible to the caller instead of silently vanishing."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            episode = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        raise LadderParseError(path, f"could not read/parse JSON: {e!r}") from e
+
+    try:
+        our_seat = find_our_seat(episode.get("info", {}), our_team_name)
+    except Exception as e:
+        raise LadderParseError(path, f"malformed 'info' block: {e!r}") from e
+
+    if our_seat is None:
+        return None
+
+    try:
+        return _parse_matched_episode(episode, our_seat, path)
+    except LadderParseError:
+        raise
+    except Exception as e:
+        raise LadderParseError(
+            path, f"unexpected shape while parsing a matched episode: {e!r}") from e

@@ -85,22 +85,25 @@ def _run_local_losses(games_per_opponent: int, workers: int, out_dir: str) -> di
 # ---------------------------------------------------------------------------
 
 def _load_ladder_games(episodes_dir: str) -> list[dict]:
-    """Parses every episode JSON in episodes_dir into a loss_review.py-shaped record (any
+    """Parses every episode JSON under episodes_dir into a loss_review.py-shaped record (any
     outcome -- callers filter for losses themselves; archetype win/loss breakdown needs wins
-    too). Concrete field names are filled in against a real sample episode (see
-    runs/measure_state.json / tools/measure.py for how episodes got here) -- this raises loudly
-    rather than guessing at a schema if a file doesn't look like what we expect, so a format
-    surprise shows up as an error, not a silently-empty report."""
+    too). Walks recursively since tools/measure.py now lays episodes out as
+    runs/our_episodes/<date>/<episode_id>.json (one subdir per scanned day) rather than a
+    single flat directory. Concrete field names are filled in against a real sample episode
+    (see runs/measure_state.json / tools/measure.py for how episodes got here) -- this raises
+    loudly rather than guessing at a schema if a file doesn't look like what we expect, so a
+    format surprise shows up as an error, not a silently-empty report."""
     from ladder_episode_parser import parse_episode_file  # noqa: E402 (local import, see below)
 
     games = []
-    for name in sorted(os.listdir(episodes_dir)):
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(episodes_dir, name)
-        rec = parse_episode_file(path)
-        if rec is not None:
-            games.append(rec)
+    for dirpath, _, filenames in os.walk(episodes_dir):
+        for name in sorted(filenames):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(dirpath, name)
+            rec = parse_episode_file(path)
+            if rec is not None:
+                games.append(rec)
     return games
 
 
