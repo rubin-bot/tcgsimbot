@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
@@ -90,6 +91,27 @@ MAX_ROOT_OPTIONS = 30  # beyond this, defer to the cheap baseline for that decis
 # below, not the depth.
 MAX_OUR_PLIES = 2
 MAX_STEP_DEPTH = 80    # mirrors mcts.py's forced-step cap
+
+# v3: score every root option under N independent hidden-world samples (src/determinize.py has
+# no seed -- each call is an independent draw) and pick by majority vote across samples, instead
+# of the single arbitrary determinization v1/v2 used. Per docs/near_tie_measurement_2026-07-23.md
+# this single-sample choice flipped 93.6% of the time on repeated replay of the same real
+# decision -- most of the diagnosed starvation/tied-and-lost behavior traces back to this, not
+# to tie-break logic (v2 fixed same-kind ties but the mechanism didn't move at the 400-game gate
+# because most real ties are cross-world noise, not same-world exact ties).
+# N=8 chosen by tools/compute_v3_sample_budget.py from REAL data (not a guess): real max
+# decisions/game=91 (800 real games, runs/kernel_vs_baseline/*/vs_baseline_trace.jsonl), real
+# max single-determinization choose_action() cost=357.8ms (runs/near_tie_measurement/
+# replays.jsonl) -> worst case N*357.8ms*91 <= 50% of Kaggle's runTimeout=2000s (actTimeout=0,
+# i.e. no per-move limit -- confirmed across 75 real episode configs) gives a ceiling of N<=30;
+# 8 leaves a 3.8x safety margin. See docs/v3_report_2026-07-24.md.
+N_DETERMINIZATIONS = 8
+# Self-imposed anytime cap -- Kaggle imposes no per-move timeout (actTimeout=0). Real worst-case
+# cost at N=8 is ~2.9s (see above); 5s leaves headroom for slower real hardware while still being
+# essentially unreachable in practice. Checked only BETWEEN fully-completed world samples (never
+# mid-option-loop), so a world that contributes a vote always did so with every option scored --
+# no partial-coverage vote is ever counted.
+DECISION_TIME_GUARD_S = 5.0
 
 # Tie-break priority for options within _TIE_EPS_REL of the best score (lower = more preferred).
 # These near-ties are usually genuinely-equal-value positions under evaluate() (see above), so
@@ -516,6 +538,48 @@ def _score_option(world: dict, root_observation, sel: Selection, lo, root_your_i
         search_release(sid)
 
 
+def _score_world(world: dict, root_observation, selection: Selection, root_your_index: int,
+                  root_opp_active: PokemonView | None, weights: dict[str, float],
+                  collect_features: bool):
+    """Scores every option in `selection` under ONE sampled hidden world (mirrors the pre-v3
+    single-world body of choose_action, extracted so v3 can call it once per determinization).
+    Returns (scores, features_by_index, best_index) -- best_index is None if every option's
+    search was rejected by the engine for this particular world (mirrors the original
+    single-world "search_rejected" semantics; a world like this contributes no vote at all,
+    it doesn't fail the whole decision -- see choose_action).
+
+    Within-world ties (multiple options scored identically under THIS world -- e.g. attaching
+    energy to structurally-symmetric bench Pokemon, which doesn't depend on hidden info and so
+    often ties identically across every world) are broken via v2's _break_ties BEFORE this
+    world casts its vote, exactly as the pre-v3 single-world code did. Without this, a
+    same-every-world tie would always resolve to the same arbitrary first-max option in every
+    sampled world, produce a clean cross-world majority vote for it, and never reach
+    _aggregate_votes's own tie-break fallthrough at all -- silently reintroducing the exact
+    bug v2 fixed."""
+    scores: dict[int, float] = {}
+    features_by_index: dict[int, dict] = {}
+    best_score = None
+    best_index = None
+    for lo in selection.options:
+        result = _score_option(world, root_observation, selection, lo, root_your_index,
+                                root_opp_active, weights, collect_features=collect_features)
+        if result is None:
+            continue
+        if collect_features:
+            score, feats = result
+            features_by_index[lo.index] = feats
+        else:
+            score = result
+        scores[lo.index] = score
+        if best_score is None or score > best_score:
+            best_score, best_index = score, lo.index
+    if best_index is not None:
+        tie_broken = _break_ties(selection, scores, best_score)
+        if tie_broken is not None:
+            best_index = tie_broken.index
+    return scores, features_by_index, best_index
+
+
 def _pipeline_energy_deficit(pv) -> int | None:
     """None if pv isn't part of the attacker's evolution pipeline (ATTACKER_PIPELINE_IDS) at
     all; otherwise how much more energy it needs to reach ATTACKER_ENERGY_COST (0 = already at
@@ -574,6 +638,32 @@ def _trace_options(selection: Selection, scores: dict[int, float] | None,
     return out
 
 
+def _aggregate_votes(votes: Counter, score_sum: dict[int, float],
+                      selection: Selection) -> int:
+    """v3 aggregation: majority vote across N determinizations, score-sum as tie-break across
+    samples, then v2's target-aware tie-break (_tie_break_key) for any residual exact tie.
+    `votes` and `score_sum` must be non-empty (choose_action falls back to baseline before
+    calling this if every sampled world's search was rejected). Returns the winning option's
+    index. Pure function of its inputs -- no search/engine access -- so it's directly
+    unit-testable with synthetic vote/score data (tests/test_v3_voting.py)."""
+    max_votes = max(votes.values())
+    tied_by_votes = [idx for idx, c in votes.items() if c == max_votes]
+    if len(tied_by_votes) == 1:
+        return tied_by_votes[0]
+
+    best_sum = max(score_sum[idx] for idx in tied_by_votes)
+    eps = _TIE_EPS_REL * max(abs(best_sum), 1.0)
+    tied_by_sum = [idx for idx in tied_by_votes if abs(score_sum[idx] - best_sum) <= eps]
+    if len(tied_by_sum) == 1:
+        return tied_by_sum[0]
+
+    # residual exact tie (same-kind, same-target-class options that scored identically in
+    # every sampled world) -- fall through to v2's target-aware tie-break, applied directly to
+    # the tied subset via the same key function _break_ties itself uses.
+    candidates = [lo for lo in selection.options if lo.index in tied_by_sum]
+    return min(candidates, key=_tie_break_key).index
+
+
 def choose_action(game_state: GameState, selection: Selection, obs_dict: dict,
                    deck_list: list[int], opp_deck_list: list[int] | None = None,
                    trace_fn=None, weights: dict[str, float] | None = None) -> list[int]:
@@ -584,7 +674,11 @@ def choose_action(game_state: GameState, selection: Selection, obs_dict: dict,
 
     def emit(mode: str, scores: dict[int, float] | None = None,
              chosen_index: int | None = None,
-             features_by_index: dict[int, dict] | None = None) -> None:
+             features_by_index: dict[int, dict] | None = None,
+             n_samples_completed: int | None = None,
+             votes: dict[int, int] | None = None,
+             score_sum: dict[int, float] | None = None,
+             time_guard_fired: bool | None = None) -> None:
         if trace_fn is None:
             return
         trace_fn({
@@ -595,6 +689,10 @@ def choose_action(game_state: GameState, selection: Selection, obs_dict: dict,
             "opp_active": _mon_summary(game_state.opponent.active),
             "options": _trace_options(selection, scores, features_by_index),
             "chosen_index": chosen_index,
+            "n_samples_completed": n_samples_completed,
+            "votes": votes,
+            "score_sum": score_sum,
+            "time_guard_fired": time_guard_fired,
         })
 
     if selection.max_count == 0:
@@ -612,38 +710,45 @@ def choose_action(game_state: GameState, selection: Selection, obs_dict: dict,
     root_observation = to_observation_class(obs_dict)
     root_your_index = game_state.your_index
     root_opp_active = game_state.opponent.active  # snapshot before any simulated action
-    world = sample_determinization(game_state, deck_list, opp_deck_list)
 
-    best_lo = None
-    best_score = None
-    scores: dict[int, float] = {}
+    votes: Counter = Counter()
+    score_sum: dict[int, float] = {}
     features_by_index: dict[int, dict] = {}
-    for lo in selection.options:
-        result = _score_option(world, root_observation, selection, lo, root_your_index,
-                                root_opp_active, weights, collect_features=collect_features)
-        if result is None:
-            continue
-        if collect_features:
-            score, feats = result
-            features_by_index[lo.index] = feats
-        else:
-            score = result
-        scores[lo.index] = score
-        if best_score is None or score > best_score:
-            best_score, best_lo = score, lo
+    n_samples_completed = 0
+    time_guard_fired = False
+    t_start = time.perf_counter()
 
-    if best_lo is None:  # every candidate world/step rejected -- fall back
+    for i in range(N_DETERMINIZATIONS):
+        if i > 0 and (time.perf_counter() - t_start) >= DECISION_TIME_GUARD_S:
+            time_guard_fired = True
+            break
+        world = sample_determinization(game_state, deck_list, opp_deck_list)
+        world_scores, world_features, world_best_index = _score_world(
+            world, root_observation, selection, root_your_index, root_opp_active, weights,
+            collect_features=collect_features,
+        )
+        n_samples_completed += 1
+        if not features_by_index and world_features:
+            features_by_index = world_features  # first completed world's, for tracing only
+        if world_best_index is None:
+            continue  # this world's search was entirely rejected -- no vote, not a failure
+        votes[world_best_index] += 1
+        for idx, sc in world_scores.items():
+            score_sum[idx] = score_sum.get(idx, 0.0) + sc
+
+    if not votes:  # every completed world's search was rejected -- fall back
         _FALLBACK_COUNTS["search_rejected"] += 1
         result = baseline_choose_action(game_state, selection)
         emit("search_rejected", chosen_index=result[0] if result else None)
         return result
 
-    tie_broken = _break_ties(selection, scores, best_score)
-    if tie_broken is not None:
-        best_lo = tie_broken
+    winner_index = _aggregate_votes(votes, score_sum, selection)
+    best_lo = next(lo for lo in selection.options if lo.index == winner_index)
 
-    emit("searched", scores=scores, chosen_index=best_lo.index,
-         features_by_index=features_by_index)
+    emit("searched", scores=score_sum, chosen_index=best_lo.index,
+         features_by_index=features_by_index,
+         n_samples_completed=n_samples_completed, votes=dict(votes), score_sum=dict(score_sum),
+         time_guard_fired=time_guard_fired)
     return _build_index_list(selection, best_lo.index)
 
 
