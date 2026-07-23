@@ -32,6 +32,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import random
 import subprocess
 import sys
 import threading
@@ -198,6 +199,53 @@ def run_one_game(python_exe: str, candidate: str, opponent: str, candidate_deck:
     }
 
 
+def load_opponent_pool(path: str) -> list[dict]:
+    """--opponent-pool spec: a JSON list of {"name", "deck", "weight"} objects (weights need
+    not sum to 1 -- normalized by random.choices). Master-study Workstream C3 usage: a ~1/3
+    Alakazam-sparring / 1/3 Munkidori-sparring / 1/3 baseline mix matching docs/
+    meta_report_2026-07-22.md's real top-100 archetype distribution."""
+    with open(path, encoding="utf-8") as f:
+        pool = json.load(f)
+    for entry in pool:
+        if entry["name"] not in AGENT_NAMES:
+            sys.exit(f"--opponent-pool entry {entry!r}: name must be one of {AGENT_NAMES}")
+    return pool
+
+
+def _print_pool_summary(candidate: str, records: list) -> None:
+    """Like _print_summary, but for --opponent-pool runs: an overall aggregate PLUS a
+    per-opponent-identity breakdown (grouped by (opponent, opponent_deck) since a pool can
+    contain the same --opponent name piloting different decks, e.g. two search_scorer entries
+    for Alakazam vs Munkidori)."""
+    import math
+    from collections import defaultdict
+
+    def stats(rows):
+        n = len(rows)
+        wins = sum(1 for r in rows if r["outcome"] == "candidate_win")
+        losses = sum(1 for r in rows if r["outcome"] == "opponent_win")
+        draws = sum(1 for r in rows if r["outcome"] == "draw")
+        crashes = sum(1 for r in rows if r["outcome"] == "crash")
+        wr = (wins + 0.5 * draws) / n if n else 0.0
+        se = math.sqrt(wr * (1 - wr) / n) if n else 0.0
+        ci = (max(0.0, wr - 1.96 * se), min(1.0, wr + 1.96 * se))
+        return {"n": n, "wins": wins, "losses": losses, "draws": draws, "crashes": crashes,
+                "win_rate": wr, "win_rate_95ci": ci}
+
+    print(f"\n=== {candidate} vs opponent pool: {len(records)} games ===")
+    overall = stats(records)
+    print(f"OVERALL: {json.dumps(overall, indent=2)}")
+
+    by_group: dict = defaultdict(list)
+    for r in records:
+        key = f"{r['opponent']}:{os.path.basename(r.get('opponent_deck', '?'))}"
+        by_group[key].append(r)
+    print("\nper-matchup breakdown:")
+    for key, rows in sorted(by_group.items()):
+        s = stats(rows)
+        print(f"  {key}: {json.dumps(s)}")
+
+
 def _print_summary(candidate: str, opponent: str, records: list) -> None:
     n = len(records)
     wins = sum(1 for r in records if r["outcome"] == "candidate_win")
@@ -232,7 +280,14 @@ def _print_summary(candidate: str, opponent: str, records: list) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidate", default="search_scorer", choices=AGENT_NAMES)
-    ap.add_argument("--opponent", required=True, choices=AGENT_NAMES)
+    ap.add_argument("--opponent", required=False, choices=AGENT_NAMES,
+                     help="single fixed opponent for the whole run. Mutually exclusive with "
+                          "--opponent-pool.")
+    ap.add_argument("--opponent-pool", default=None,
+                     help="path to a JSON list of {name, deck, weight} objects -- picks a "
+                          "DIFFERENT opponent per game via a weighted random draw (seeded off "
+                          "--seed + game index, reproducible) instead of one fixed --opponent "
+                          "for the whole run. Mutually exclusive with --opponent.")
     ap.add_argument("--candidate-deck", default=DEFAULT_DECK)
     ap.add_argument("--opponent-deck", default=DEFAULT_DECK)
     ap.add_argument("--games", type=int, default=50)
@@ -254,6 +309,10 @@ def main() -> None:
                      help="Same, for --opponent search_scorer -- lets both sides run "
                           "search_scorer with different weight sets in the same game.")
     args = ap.parse_args()
+
+    if bool(args.opponent) == bool(args.opponent_pool):
+        sys.exit("Pass exactly one of --opponent or --opponent-pool.")
+    opponent_pool = load_opponent_pool(args.opponent_pool) if args.opponent_pool else None
 
     if args.workers > 2:
         print(f"WARNING: --workers {args.workers} > 2 -- each worker runs a full engine "
@@ -282,8 +341,9 @@ def main() -> None:
         with open(args.out) as f:
             existing = [json.loads(l) for l in f if l.strip()]
         completed = len(existing)
-        if existing and (existing[-1]["candidate"] != args.candidate
-                          or existing[-1]["opponent"] != args.opponent):
+        if (not opponent_pool and existing
+                and (existing[-1]["candidate"] != args.candidate
+                     or existing[-1]["opponent"] != args.opponent)):
             print(f"WARNING: {args.out} was recorded for "
                   f"{existing[-1]['candidate']} vs {existing[-1]['opponent']}, not "
                   f"{args.candidate} vs {args.opponent} -- this looks like the wrong file, "
@@ -300,10 +360,14 @@ def main() -> None:
               f"to do.")
         with open(args.out) as f:
             records = [json.loads(l) for l in f if l.strip()]
-        _print_summary(args.candidate, args.opponent, records)
+        if opponent_pool:
+            _print_pool_summary(args.candidate, records)
+        else:
+            _print_summary(args.candidate, args.opponent, records)
         return
 
-    print(f"Running {remaining} games: {args.candidate} vs {args.opponent} "
+    opponent_label = "opponent pool" if opponent_pool else args.opponent
+    print(f"Running {remaining} games: {args.candidate} vs {opponent_label} "
           f"(workers={args.workers}, timeout={args.timeout}s, rss_cap={args.rss_cap_mb}MB) "
           f"-> {args.out}")
 
@@ -313,13 +377,22 @@ def main() -> None:
     def _run(i: int) -> dict:
         seed = args.seed + i
         candidate_seat = i % 2
+        if opponent_pool:
+            # Reseeded per game index (not a shared advancing Random) so the draw is
+            # reproducible regardless of worker-thread execution order.
+            choice = random.Random(seed).choices(
+                opponent_pool, weights=[e["weight"] for e in opponent_pool], k=1)[0]
+            opponent_name, opponent_deck = choice["name"], choice["deck"]
+        else:
+            opponent_name, opponent_deck = args.opponent, args.opponent_deck
         record = run_one_game(
-            args.python, args.candidate, args.opponent, args.candidate_deck,
-            args.opponent_deck, candidate_seat, seed, args.timeout, args.rss_cap_mb,
+            args.python, args.candidate, opponent_name, args.candidate_deck,
+            opponent_deck, candidate_seat, seed, args.timeout, args.rss_cap_mb,
             enforce_rss, args.replay_out, i,
             candidate_weights=args.candidate_weights, opponent_weights=args.opponent_weights,
         )
         record["game"] = i
+        record["opponent_deck"] = opponent_deck
         return record
 
     with open(args.out, "a", encoding="utf-8") as out_f:
@@ -344,7 +417,10 @@ def main() -> None:
 
     with open(args.out, encoding="utf-8") as f:
         all_records = [json.loads(l) for l in f if l.strip()]
-    _print_summary(args.candidate, args.opponent, all_records)
+    if opponent_pool:
+        _print_pool_summary(args.candidate, all_records)
+    else:
+        _print_summary(args.candidate, args.opponent, all_records)
 
 
 if __name__ == "__main__":
