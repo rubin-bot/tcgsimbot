@@ -141,6 +141,15 @@ def _parse_matched_episode(episode: dict, our_seat: int, path: str) -> dict:
     steps = episode["steps"]
     decisions = []
     for i in range(len(steps) - 1):
+        # Kaggle logs an observation for BOTH seats at every step regardless of whose turn it
+        # is; when it's not our turn, our seat's status is "INACTIVE" and its observation.select
+        # is a stale carry-over of our last real decision, not a new one -- confirmed 2026-07-23
+        # by hand-tracing real episodes (e.g. one real ACTIVE attack decision was followed by 8
+        # consecutive INACTIVE steps replaying the identical select with action=[], which this
+        # loop used to log as 8 separate "declined" decisions). Skipping non-ACTIVE steps is the
+        # fix -- see docs/ladder_attack_decline_diagnosis_2026-07-23.md.
+        if steps[i][our_seat].get("status") != "ACTIVE":
+            continue
         obs_dict = steps[i][our_seat]["observation"]
         if obs_dict.get("select") is None or obs_dict.get("current") is None:
             continue

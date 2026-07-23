@@ -57,8 +57,10 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
+import kaggle_common  # noqa: E402
 from kaggle_common import (  # noqa: E402
     OUR_TEAM_NAME, SIMULATION_COMPETITION, fetch_leaderboard_rows, kaggle_cmd,
+    load_episode_submissions, save_episode_submissions,
 )
 
 # Console is cp1252 on this machine (CLAUDE.md's Tooling notes); this file prints "μ" --
@@ -71,6 +73,7 @@ VERSIONS_PATH = os.path.join(ROOT, "VERSIONS.md")
 RUNS_DIR = os.path.join(ROOT, "runs")
 MEASURE_STATE_PATH = os.path.join(RUNS_DIR, "measure_state.json")
 MU_HISTORY_PATH = os.path.join(RUNS_DIR, "mu_history.jsonl")
+EPISODE_SUBMISSIONS_PATH = kaggle_common.EPISODE_SUBMISSIONS_PATH
 DAILY_DATASET_PREFIX = "kaggle/pokemon-tcg-ai-battle-episodes-"
 MAX_DAYS_FORWARD_PROBE = 3  # how many days past "newest known" to probe for a new publish
 SEARCH_CHUNK_BYTES = 16_384  # info.TeamNames is near the top of every episode JSON (confirmed)
@@ -132,12 +135,23 @@ def update_versions_mu(submissions: list[dict]) -> str | None:
     return mu
 
 
-def append_mu_history(mu: str | None, rank: str | None) -> None:
+def append_mu_history(mu: str | None, rank: str | None,
+                       submissions: list[dict] | None = None) -> None:
+    """`mu`/`rank` stay as before (the newest active submission's score, which is also what the
+    leaderboard row displays -- confirmed 2026-07-23 by direct comparison). `submissions`, if
+    given, additionally logs EVERY active submission's own publicScore -- e.g. v1 and the older
+    net checkpoint have very different scores (568.6 vs 309.3) that the single `mu` field can't
+    distinguish; see docs/ladder_attack_decline_diagnosis_2026-07-23.md."""
     os.makedirs(RUNS_DIR, exist_ok=True)
     record = {
         "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "mu": mu, "rank": rank,
     }
+    if submissions:
+        record["submissions"] = [
+            {"ref": s["ref"], "fileName": s["fileName"], "publicScore": s["publicScore"]}
+            for s in submissions[:2]
+        ]
     with open(MU_HISTORY_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
 
@@ -187,9 +201,13 @@ def download_episode_replay(episode_id: int, out_dir: str) -> str | None:
 def fetch_our_episodes_via_submission_api(submissions: list[dict]) -> dict[str, int]:
     """For each of our currently-active submissions (last 2, per the competition's rules),
     fetches its full episode index and downloads every non-validation replay. Returns
-    {date: count} across all active submissions combined."""
+    {date: count} across all active submissions combined. Also (re)builds
+    EPISODE_SUBMISSIONS_PATH's {episode_id: submission_id} map for every ladder episode the
+    index returns, whether or not its replay was newly downloaded this run -- re-running this
+    naturally backfills the map for episodes fetched by earlier code before this map existed."""
     episodes_root = os.path.join(RUNS_DIR, "our_episodes")
     counts: dict[str, int] = {}
+    episode_submissions = load_episode_submissions()
     for s in submissions[:2]:
         submission_id = s["ref"]
         print(f"fetching episode index for submission {submission_id} ({s['fileName']}) ...")
@@ -210,6 +228,9 @@ def fetch_our_episodes_via_submission_api(submissions: list[dict]) -> dict[str, 
             path = download_episode_replay(ep["id"], out_dir)
             if path is not None:
                 counts[date] = counts.get(date, 0) + 1
+                episode_submissions[str(ep["id"])] = submission_id
+    save_episode_submissions(episode_submissions)
+    print(f"  wrote {EPISODE_SUBMISSIONS_PATH} ({len(episode_submissions)} episodes mapped)")
     return counts
 
 
@@ -326,7 +347,7 @@ def main() -> None:
     if lb_row:
         print(f"leaderboard: rank={rank} score={lb_row.get('Score')} "
               f"submission_count={submission_count}")
-    append_mu_history(mu, rank)
+    append_mu_history(mu, rank, submissions)
 
     state = {
         "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

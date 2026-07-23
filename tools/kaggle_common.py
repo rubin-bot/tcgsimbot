@@ -13,6 +13,7 @@ import csv
 import glob
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -24,6 +25,41 @@ SIMULATION_COMPETITION = "pokemon-tcg-ai-battle"
 # This account's leaderboard TeamName (kaggle competitions leaderboard --csv,
 # TeamMemberUserNames == "rubinsahota") -- update here if the team is ever renamed.
 OUR_TEAM_NAME = "Rubin Sahota"
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EPISODE_SUBMISSIONS_PATH = os.path.join(_ROOT, "runs", "our_episodes", "episode_submissions.json")
+
+# Human-readable labels for the submission ids seen so far -- update when a new submission
+# version ships. Confirmed 2026-07-23 (git show 81b1e6e): 54898784 is NOT search_scorer, it's
+# the deprecated AlphaZero net-checkpoint agent (determinized MCTS, falls back to
+# src/baseline.py on any exception) -- a structurally different, much weaker agent.
+SUBMISSION_LABELS = {
+    "54909461": "v1_search_scorer",
+    "54898784": "net_checkpoint",
+}
+
+
+def load_episode_submissions() -> dict[str, str]:
+    """{episode_id (str) -> submission_id (str)} -- episode JSON itself carries no submission
+    id (confirmed 2026-07-23: info.Agents has only Name/ThumbnailUrl), so this manifest, built
+    by tools/measure.py::fetch_our_episodes_via_submission_api from the per-submission episode
+    index, is the only place submission identity is knowable."""
+    if not os.path.exists(EPISODE_SUBMISSIONS_PATH):
+        return {}
+    with open(EPISODE_SUBMISSIONS_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_episode_submissions(mapping: dict[str, str]) -> None:
+    os.makedirs(os.path.dirname(EPISODE_SUBMISSIONS_PATH), exist_ok=True)
+    with open(EPISODE_SUBMISSIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(mapping, f, indent=2, sort_keys=True)
+
+
+def submission_label(submission_id: str | None) -> str:
+    if submission_id is None:
+        return "unknown"
+    return SUBMISSION_LABELS.get(str(submission_id), f"unknown({submission_id})")
 
 
 def find_kaggle_python() -> list[str]:

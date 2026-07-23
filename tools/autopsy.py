@@ -92,17 +92,28 @@ def _load_ladder_games(episodes_dir: str) -> list[dict]:
     single flat directory. Concrete field names are filled in against a real sample episode
     (see runs/measure_state.json / tools/measure.py for how episodes got here) -- this raises
     loudly rather than guessing at a schema if a file doesn't look like what we expect, so a
-    format surprise shows up as an error, not a silently-empty report."""
+    format surprise shows up as an error, not a silently-empty report.
+
+    Tags each record with submission_id/submission_label from
+    kaggle_common.load_episode_submissions() -- episode JSON itself carries no submission id
+    (only team name), so this is the only way to tell which of our active submissions produced
+    a given game. See docs/ladder_attack_decline_diagnosis_2026-07-23.md."""
     from ladder_episode_parser import parse_episode_file  # noqa: E402 (local import, see below)
+    from kaggle_common import load_episode_submissions, submission_label  # noqa: E402
+
+    episode_submissions = load_episode_submissions()
 
     games = []
     for dirpath, _, filenames in os.walk(episodes_dir):
         for name in sorted(filenames):
-            if not name.endswith(".json"):
+            if not name.endswith(".json") or name == "episode_submissions.json":
                 continue
             path = os.path.join(dirpath, name)
             rec = parse_episode_file(path)
             if rec is not None:
+                submission_id = episode_submissions.get(rec["game"])
+                rec["submission_id"] = submission_id
+                rec["submission_label"] = submission_label(submission_id)
                 games.append(rec)
     return games
 
@@ -190,6 +201,10 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=2, help="local mode: max 2 per hardware "
                      "rules (each worker is a full engine subprocess)")
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "runs", "autopsy_local"))
+    ap.add_argument("--split-by-submission", action="store_true",
+                     help="ladder mode: run the report once per submission_label (e.g. "
+                          "v1_search_scorer vs. net_checkpoint) instead of once for the pooled "
+                          "set -- see docs/ladder_attack_decline_diagnosis_2026-07-23.md")
     args = ap.parse_args()
 
     source = _resolve_auto_source() if args.source == "auto" else args.source
@@ -207,9 +222,19 @@ def main() -> None:
         if not episodes_dir or not os.path.isdir(episodes_dir):
             sys.exit(f"ladder mode needs a valid episodes dir; got {episodes_dir!r}")
         all_games = _load_ladder_games(episodes_dir)
-        losses = [g for g in all_games if g["outcome"] == "opponent_win"]
-        _print_report(losses, f"LADDER ({episodes_dir})", skip_local_only=True)
-        analyze_opponent_archetypes(all_games)
+
+        if args.split_by_submission:
+            by_label: dict[str, list] = {}
+            for g in all_games:
+                by_label.setdefault(g["submission_label"], []).append(g)
+            for label, games in sorted(by_label.items()):
+                losses = [g for g in games if g["outcome"] == "opponent_win"]
+                _print_report(losses, f"LADDER [{label}] ({episodes_dir})", skip_local_only=True)
+                analyze_opponent_archetypes(games)
+        else:
+            losses = [g for g in all_games if g["outcome"] == "opponent_win"]
+            _print_report(losses, f"LADDER ({episodes_dir})", skip_local_only=True)
+            analyze_opponent_archetypes(all_games)
 
 
 if __name__ == "__main__":
