@@ -2,7 +2,8 @@
 
 Per `CLAUDE.md`'s Submission policy: 1 submission/day, `latest 2` scored, μ logged here once
 Kaggle scores it. Local win rates are the pre-submission regression check, not the ship gate,
-from v1 onward (see `CLAUDE.md`'s "Local-arena gate retired as of v1" for why).
+from v1 onward (see `CLAUDE.md`'s "Architecture" section, and the `verification-gate` skill,
+for why).
 
 ## v1 — 2026-07-22
 

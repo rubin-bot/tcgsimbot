@@ -17,7 +17,9 @@ Quick shape (see `ITERATE.md` for the real commands and caveats):
    have real losses, local `baseline`/`random` fallback otherwise). Show it to the user.
 3. **FIX** — one candidate fix for the top failure mode, proven over 400+ games via
    `scripts/build_kernel_bakeoff.py` (a Kaggle kernel attached to the competition — never
-   re-upload the SDK/card data ourselves). No proven win, no ship; try the next candidate.
+   re-upload the SDK/card data ourselves). No proven win, no ship; try the next candidate. Use
+   the **`verification-gate`** skill for the full protocol (coverage-estimate requirement,
+   mechanism-metric requirement, decision rule) — don't improvise a lighter version of it.
 4. **SHIP** — `scripts/build_submission.py` → `scripts/verify_submission.py` →
    `scripts/submit.py`, log in `VERSIONS.md`, commit + push, tell the user to come back
    tomorrow.
@@ -27,3 +29,7 @@ submission/day, max 2 local simulator workers, everything resumable, stream to d
 
 If `runs/measure_state.json` doesn't exist yet or looks stale, run MEASURE before DIAGNOSE —
 `tools/autopsy.py --source auto` depends on it to pick ladder vs. local mode.
+
+For anything involving real Kaggle episode data (fetching, parsing, replay-and-vote checks, or
+ladder-wide meta-mining beyond our own games), use the **`ladder-analysis`** skill — it has the
+parser gotchas (ACTIVE filter, BOM, bulk-dump subsample caveat) and the exact tool commands.
