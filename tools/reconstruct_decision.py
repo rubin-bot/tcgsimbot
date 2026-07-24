@@ -87,7 +87,8 @@ N_RESAMPLE = 20  # matches N_REPLAYS in tools/measure_near_tie_hypothesis.py, fo
 
 def run_self_test(episodes_root: str, deck_path: str, v1_snapshot_path: str,
                    our_team_name: str, v1_submission_id: str,
-                   tuned_weights_path: str | None = None) -> dict:
+                   tuned_weights_path: str | None = None,
+                   checkpoint_path: str | None = None) -> dict:
     import glob
     import importlib.util
 
@@ -131,16 +132,52 @@ def run_self_test(episodes_root: str, deck_path: str, v1_snapshot_path: str,
                       if os.path.splitext(os.path.basename(p))[0] in v1_episode_ids]
     print(f"{len(all_paths)} episode files found under {episodes_root}, "
           f"{len(episode_paths)} attributed to v1 (submission {v1_submission_id})")
-    n_agree = 0
-    n_disagree = 0
-    n_disagree_near_tie = 0
-    n_disagree_genuine = 0
-    n_genuine_reachable_via_resample = 0
+
+    # Resumable via a checkpoint of per-episode accumulated counters (the native cg SDK leaks
+    # memory across enough repeated search_begin/release calls that a long-running single process
+    # eventually MemoryErrors -- confirmed independently in tools/decision_diff.py's full-corpus
+    # run; this self-test's N_RESAMPLE=20-per-genuine-disagreement multiplier hits the same
+    # ceiling even over just ~45 episodes). Checkpoint is episode-granular, matching this
+    # project's hardware-rule convention ("every long-running script must be resumable and
+    # checkpoint frequently").
+    done_episodes: set[str] = set()
+    n_agree = n_disagree = n_disagree_near_tie = n_disagree_genuine = 0
+    n_genuine_reachable_via_resample = n_decisions = n_episodes_checked = 0
     disagreements = []
-    n_decisions = 0
-    n_episodes_checked = 0
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        with open(checkpoint_path, encoding="utf-8") as f:
+            ckpt = json.load(f)
+        done_episodes = set(ckpt["done_episodes"])
+        n_agree = ckpt["n_agree"]
+        n_disagree = ckpt["n_disagree"]
+        n_disagree_near_tie = ckpt["n_disagree_near_tie"]
+        n_disagree_genuine = ckpt["n_disagree_genuine"]
+        n_genuine_reachable_via_resample = ckpt["n_genuine_reachable_via_resample"]
+        n_decisions = ckpt["n_decisions"]
+        n_episodes_checked = ckpt["n_episodes_checked"]
+        disagreements = ckpt["disagreements"]
+        print(f"resuming from checkpoint: {len(done_episodes)}/{len(episode_paths)} "
+              f"episodes already done")
+
+    def save_checkpoint():
+        if not checkpoint_path:
+            return
+        tmp_path = checkpoint_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "done_episodes": sorted(done_episodes), "n_agree": n_agree,
+                "n_disagree": n_disagree, "n_disagree_near_tie": n_disagree_near_tie,
+                "n_disagree_genuine": n_disagree_genuine,
+                "n_genuine_reachable_via_resample": n_genuine_reachable_via_resample,
+                "n_decisions": n_decisions, "n_episodes_checked": n_episodes_checked,
+                "disagreements": disagreements,
+            }, f)
+        os.replace(tmp_path, checkpoint_path)
 
     for path in episode_paths:
+        episode_basename = os.path.basename(path)
+        if episode_basename in done_episodes:
+            continue
         decisions = reconstruct_episode_decisions(path, our_team_name)
         if not decisions:
             continue
@@ -204,6 +241,8 @@ def run_self_test(episodes_root: str, deck_path: str, v1_snapshot_path: str,
                     "our_choice": our_choice, "hist_score": hist_score, "our_score": our_score,
                     "near_tie": is_near_tie, "reachable_via_resample": reachable_via_resample,
                 })
+        done_episodes.add(episode_basename)
+        save_checkpoint()
 
     agreement_rate = n_agree / n_decisions if n_decisions else 0.0
     # "Adjusted" agreement: near-tie disagreements + genuine disagreements that turned out to be
@@ -239,6 +278,11 @@ if __name__ == "__main__":
                      default=os.path.join(ROOT, "runs", "tune_run1", "winner_weights.json"),
                      help="tuned-weights JSON merged onto the snapshot's own module-default "
                           "WEIGHTS (default: the real shipped v1 tuning).")
+    ap.add_argument("--checkpoint",
+                     help="episode-granular checkpoint file -- resumes past a native-SDK "
+                          "MemoryError (see tools/decision_diff.py's identical issue) instead of "
+                          "restarting all episodes from scratch. Re-run the same command with "
+                          "the same --checkpoint path to resume; delete the file for a clean run.")
     args = ap.parse_args()
     if args.self_test:
         from kaggle_common import OUR_TEAM_NAME
@@ -249,6 +293,7 @@ if __name__ == "__main__":
             OUR_TEAM_NAME,
             V1_SUBMISSION_ID,
             args.weights,
+            args.checkpoint,
         )
         print(json.dumps({k: v for k, v in result.items() if k != "sample_disagreements"},
                           indent=2))
