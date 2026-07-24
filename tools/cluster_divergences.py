@@ -205,8 +205,23 @@ def add_outcome_linkage_and_examples(ranked: list[dict]) -> None:
 
 
 def main() -> None:
-    expert_records = load_diff(EXPERT_DIFF_PATH)
-    control_records = load_diff(CONTROL_DIFF_PATH)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in-suffix", default="",
+                     help="reads runs/decision_diff/{expert,control}_diff{suffix}.jsonl -- "
+                          "e.g. '_v4' to read tools/decision_diff.py's --out-suffix _v4 output "
+                          "instead of v1's baseline files.")
+    ap.add_argument("--out-suffix", default="",
+                     help="writes runs/decision_diff/clusters{suffix}.json instead of "
+                          "overwriting v1's baseline clusters.json.")
+    args = ap.parse_args()
+
+    expert_path = os.path.join(os.path.dirname(EXPERT_DIFF_PATH), f"expert_diff{args.in_suffix}.jsonl")
+    control_path = os.path.join(os.path.dirname(CONTROL_DIFF_PATH), f"control_diff{args.in_suffix}.jsonl")
+    out_path = os.path.join(os.path.dirname(OUT_PATH), f"clusters{args.out_suffix}.json")
+
+    expert_records = load_diff(expert_path)
+    control_records = load_diff(control_path)
     print(f"expert records: {len(expert_records)}, control records: {len(control_records)}")
 
     expert_clusters = build_clusters(expert_records)
@@ -230,10 +245,10 @@ def main() -> None:
     # strip internal-only field before writing
     for c in ranked:
         c.pop("_disagreement_records", None)
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
-    with open(OUT_PATH, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(ranked, f, indent=2, ensure_ascii=False)
-    print(f"\nwrote {OUT_PATH}")
+    print(f"\nwrote {out_path}")
 
 
 if __name__ == "__main__":

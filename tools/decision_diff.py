@@ -45,15 +45,24 @@ TUNED_WEIGHTS_PATH = os.path.join(ROOT, "runs", "tune_run1", "winner_weights.jso
 DECK_PATH = os.path.join(ROOT, "decks", "crustle_wall_deck.csv")
 
 
-def load_v1():
-    spec = importlib.util.spec_from_file_location("search_scorer_v1_diff", V1_SNAPSHOT_PATH)
-    v1 = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(v1)
-    with open(TUNED_WEIGHTS_PATH, encoding="utf-8") as f:
-        override = json.load(f)
-    weights = dict(v1.WEIGHTS)
-    weights.update(override)
-    return v1, weights
+def load_v1(snapshot_path: str = V1_SNAPSHOT_PATH, weights_path: str | None = TUNED_WEIGHTS_PATH,
+            module_name: str = "search_scorer_v1_diff"):
+    """Loads any search_scorer code snapshot (not just v1 -- e.g. a v4 candidate frozen under
+    runs/v4_candidates/) plus an optional tuned-weights override, merged onto that snapshot's
+    OWN module-default WEIGHTS (matching scripts/build_submission.py's real WEIGHTS.update(...)
+    packaging mechanism exactly -- see tools/reconstruct_decision.py's own docstring for why
+    this matters). Pass weights_path=None to use the snapshot's module-default WEIGHTS
+    unmodified (e.g. a v4 snapshot that doesn't need a separate tuned-weights file merged in,
+    since it already has the real shipped weights re-applied by an earlier cycle's tooling)."""
+    spec = importlib.util.spec_from_file_location(module_name, snapshot_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    weights = dict(mod.WEIGHTS)
+    if weights_path:
+        with open(weights_path, encoding="utf-8") as f:
+            override = json.load(f)
+        weights.update(override)
+    return mod, weights
 
 
 def load_teams(group: str) -> list[dict]:
@@ -101,13 +110,17 @@ def outcome_for_team(episode_path: str, team_name: str) -> str | None:
     return "draw"
 
 
-def run_diff(group: str, date: str, deck: list[int], v1, weights) -> dict:
+def run_diff(group: str, date: str, deck: list[int], v1, weights,
+             out_suffix: str = "") -> dict:
     teams = load_teams(group)
     team_names = [t["team_name"] for t in teams]
     corpus_dir = CORPUS_DIR_TEMPLATE.format(date=date)
     episode_paths = sorted(glob.glob(os.path.join(corpus_dir, "*.json")))
 
-    out_path = os.path.join(OUT_DIR, f"{group}_diff.jsonl")
+    # out_suffix (e.g. "_v4") keeps a new snapshot's diff output alongside v1's baseline files
+    # rather than overwriting them -- runs/decision_diff/{group}_diff.jsonl stays v1's, a v4
+    # run writes runs/decision_diff/{group}_diff_v4.jsonl instead.
+    out_path = os.path.join(OUT_DIR, f"{group}_diff{out_suffix}.jsonl")
     os.makedirs(OUT_DIR, exist_ok=True)
     done = load_done_keys(out_path)
     print(f"{group}: {len(team_names)} teams, {len(episode_paths)} episode files in corpus, "
@@ -173,11 +186,21 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--group", choices=("expert", "control"), required=True)
     ap.add_argument("--date", default="2026-07-22")
+    ap.add_argument("--snapshot", default=V1_SNAPSHOT_PATH,
+                     help="search_scorer code snapshot to run (default: the frozen v1 "
+                          "snapshot) -- e.g. runs/v4_candidates/search_scorer_v4_snapshot.py")
+    ap.add_argument("--weights", default=TUNED_WEIGHTS_PATH,
+                     help="tuned-weights JSON to merge onto the snapshot's own module-default "
+                          "WEIGHTS (default: the real shipped v1 tuning). Pass an empty string "
+                          "to use the snapshot's module-default WEIGHTS unmodified.")
+    ap.add_argument("--out-suffix", default="",
+                     help="appended to the output filename, e.g. '_v4', so a new snapshot's "
+                          "diff never overwrites runs/decision_diff/{group}_diff.jsonl")
     args = ap.parse_args()
 
     deck = read_deck_csv(DECK_PATH)
-    v1, weights = load_v1()
-    run_diff(args.group, args.date, deck, v1, weights)
+    v1, weights = load_v1(args.snapshot, args.weights or None)
+    run_diff(args.group, args.date, deck, v1, weights, out_suffix=args.out_suffix)
 
 
 if __name__ == "__main__":

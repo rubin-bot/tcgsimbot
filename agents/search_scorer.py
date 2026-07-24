@@ -129,6 +129,20 @@ _TIE_BREAK_PRIORITY = {
 }
 _TIE_EPS_REL = 1e-6  # near-exact float equality -- these are usually the SAME reachable state
 
+# v4: real expert-vs-our-agent decision diffs (docs/master_study_2026-07-24.md) found 34 real
+# early-game (turn<=4) cases where our agent chose "end" while a real strong player didn't --
+# NOT genuine ties (all 34 margins are >> _TIE_EPS_REL, so they never reach _break_ties at all;
+# "end" wins outright on raw evaluate() score, however narrowly). 26/34 (76%) are within 5%
+# relative margin of the best non-"end" alternative. Root cause (confirmed, not a search-depth
+# bug -- see docs/v4_report_2026-07-24.md): _score_branch only credits a further ply's argmax
+# while it's still our turn, so "end" is actually scored on a SHALLOWER effective lookahead than
+# continuing options, which if anything should make it harder to win -- the real driver is
+# ordinary scoring-margin noise (no seed control; a materially-large hand_diff weight in the
+# real shipped weights) tipping an otherwise-close early-game call toward passing. Widened only
+# for this evidenced population: early turns, "end" narrowly (not conclusively) ahead.
+END_NEAR_TIE_REL_THRESHOLD = 0.05  # matches tools/loss_review.py's NEAR_TIE_REL_THRESHOLD
+END_EARLY_MAX_TURN = 4             # matches tools/decision_diff.py::phase_for_turn's "early"
+
 WIN_SCORE = 1e6
 LOSS_SCORE = -1e6
 
@@ -596,7 +610,25 @@ def _pipeline_energy_deficit(pv) -> int | None:
     return max(0, ATTACKER_ENERGY_COST - len(pv.energies))
 
 
-def _tie_break_key(lo) -> tuple[int, int, int]:
+# v4 Change 2: generalizes the v2 target-aware approach to play/card-kind exact ties, scoped
+# ONLY to cards with strong, well-supported real evidence (docs/master_study_2026-07-24.md's
+# tie-break research: pairwise n>=15, expert-preferred rate >=70% or <=30% -- everything else,
+# including several very common cards like Lillie's Determination/Hilda/Buddy-Buddy Poffin, is
+# a statistical coinflip in the real data with NO clean continuous metric analogous to v2's
+# energy deficit, so it's deliberately left at the existing arbitrary engine list-order rather
+# than forcing a rule the data doesn't support). Lower priority number = preferred first.
+_PLAY_CARD_TIE_PRIORITY = {
+    1122: 0,  # Pokegear 3.0 -- expert-preferred in 81.7% of real ties (n=218)
+    1147: 0,  # Jumbo Ice Cream -- 92.9% (n=85)
+    756: 2,   # Mega Kangaskhan ex -- 22.9% (n=288)
+    1182: 2,  # Boss's Orders -- 29.7% (n=148)
+    1123: 2,  # Switch -- 33.5% (n=236)
+    1087: 2,  # Hand Trimmer -- 35.4% (n=113)
+}
+_PLAY_CARD_TIE_DEFAULT = 1  # every other play/card-kind card -- no clean signal, unchanged
+
+
+def _tie_break_key(lo) -> tuple[int, int, int, int]:
     base = _TIE_BREAK_PRIORITY.get(lo.kind, 8)
     deficit = _pipeline_energy_deficit(lo.target)
     if deficit is None:
@@ -605,7 +637,11 @@ def _tie_break_key(lo) -> tuple[int, int, int]:
         pipeline_rank, proximity = 1, 0           # in the pipeline but already fully powered --
     else:                                         # this attachment wouldn't help it further
         pipeline_rank, proximity = 0, deficit     # still needs energy -- smaller deficit (closer
-    return (base, pipeline_rank, proximity)        # to powered) sorts first
+                                                    # to powered) sorts first
+    card_priority = _PLAY_CARD_TIE_DEFAULT
+    if lo.kind in ("play", "card") and lo.card is not None:
+        card_priority = _PLAY_CARD_TIE_PRIORITY.get(lo.card.card_id, _PLAY_CARD_TIE_DEFAULT)
+    return (base, pipeline_rank, proximity, card_priority)
 
 
 def _break_ties(selection: Selection, scores: dict[int, float], best_score: float):
@@ -662,6 +698,37 @@ def _aggregate_votes(votes: Counter, score_sum: dict[int, float],
     # the tied subset via the same key function _break_ties itself uses.
     candidates = [lo for lo in selection.options if lo.index in tied_by_sum]
     return min(candidates, key=_tie_break_key).index
+
+
+def _prefer_continuing_over_end(winner_index: int, selection: Selection,
+                                 score_sum: dict[int, float], turn: int) -> int:
+    """v4: if _aggregate_votes resolved "end" as the winner in the early game (turn <=
+    END_EARLY_MAX_TURN) and a non-"end" option scored within END_NEAR_TIE_REL_THRESHOLD
+    (relative) of it, switch to the best-scoring such alternative instead. Scoped exactly to
+    the evidenced population (docs/master_study_2026-07-24.md / docs/v4_report_2026-07-24.md):
+    real experts essentially never pass here with a close alternative on the table, and these
+    are NOT genuine _TIE_EPS_REL ties (see that constant's docstring) -- "end" is winning
+    outright, just narrowly, on ordinary scoring-margin noise. Pure function of its inputs, no
+    search/engine access -- directly unit-testable with real captured score_sum snapshots
+    (tests/test_end_early.py). Never touches evaluate() or any other kind/phase/turn."""
+    if turn > END_EARLY_MAX_TURN:
+        return winner_index
+    winner_lo = next((lo for lo in selection.options if lo.index == winner_index), None)
+    if winner_lo is None or winner_lo.kind != "end":
+        return winner_index
+    end_score = score_sum.get(winner_index)
+    if end_score is None:
+        return winner_index
+    candidates = [lo for lo in selection.options
+                  if lo.kind != "end" and lo.index in score_sum]
+    if not candidates:
+        return winner_index
+    eps = END_NEAR_TIE_REL_THRESHOLD * max(abs(end_score), 1.0)
+    near_candidates = [lo for lo in candidates
+                       if abs(score_sum[lo.index] - end_score) <= eps]
+    if not near_candidates:
+        return winner_index
+    return max(near_candidates, key=lambda lo: score_sum[lo.index]).index
 
 
 def choose_action(game_state: GameState, selection: Selection, obs_dict: dict,
@@ -743,6 +810,8 @@ def choose_action(game_state: GameState, selection: Selection, obs_dict: dict,
         return result
 
     winner_index = _aggregate_votes(votes, score_sum, selection)
+    winner_index = _prefer_continuing_over_end(winner_index, selection, score_sum,
+                                                game_state.turn)
     best_lo = next(lo for lo in selection.options if lo.index == winner_index)
 
     emit("searched", scores=score_sum, chosen_index=best_lo.index,

@@ -229,16 +229,26 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--snapshot",
+                     default=os.path.join(ROOT, "runs", "v2_tie_break",
+                                           "search_scorer_v1_snapshot.py"),
+                     help="search_scorer code snapshot to self-test (default: frozen v1) -- "
+                          "e.g. runs/v4_candidates/search_scorer_v4_snapshot.py to check a v4 "
+                          "candidate for regression against the same real v1 ground truth.")
+    ap.add_argument("--weights",
+                     default=os.path.join(ROOT, "runs", "tune_run1", "winner_weights.json"),
+                     help="tuned-weights JSON merged onto the snapshot's own module-default "
+                          "WEIGHTS (default: the real shipped v1 tuning).")
     args = ap.parse_args()
     if args.self_test:
         from kaggle_common import OUR_TEAM_NAME
         result = run_self_test(
             os.path.join(ROOT, "runs", "our_episodes"),
             os.path.join(ROOT, "decks", "crustle_wall_deck.csv"),
-            os.path.join(ROOT, "runs", "v2_tie_break", "search_scorer_v1_snapshot.py"),
+            args.snapshot,
             OUR_TEAM_NAME,
             V1_SUBMISSION_ID,
-            os.path.join(ROOT, "runs", "tune_run1", "winner_weights.json"),
+            args.weights,
         )
         print(json.dumps({k: v for k, v in result.items() if k != "sample_disagreements"},
                           indent=2))
