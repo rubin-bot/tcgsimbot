@@ -92,10 +92,14 @@ Per the screen's own strict decision rule, criteria 2-4 above do not clear clean
 criterion 1 is a clean pass. **The explicit decision this cycle: ship on criterion 1 plus a
 faster, cheaper gate (below) rather than requiring the full screen to pass**, given deadline
 pressure and criterion 1's strength as the causal signal. Criteria 2-4 are logged here honestly
-as **unresolved pending a noise-floor measurement** (a same-code v1-vs-itself B0 re-run,
-`runs/decision_diff/b0_selftest_ckpt_v1_noisefloor.json`, launched 2026-07-24, still running in
-the background as of shipping — results TBD in a future update), not hidden or treated as a
-pass.
+as **unresolved pending a noise-floor measurement** at shipping time. That measurement has
+since landed: a same-code v1-vs-itself B0 re-run
+(`runs/decision_diff/b0_selftest_ckpt_v1_noisefloor.json`) scored **87.25% adjusted agreement**
+— essentially identical to the 87.4% bar it originally set (0.15pp apart), and much closer to
+v4's 86.6% than the "miss" framing suggested at ship time. Read together: the B0 criterion was
+sitting right at its own noise floor, so v4's 0.8pp shortfall likely was never a meaningful
+regression signal, retroactively supporting the decision to ship on Leg A/B instead of waiting
+on this criterion.
 
 **Smoke test** (`runs/v4_gate/smoke_test.jsonl`, 50 games vs. `baseline`): PASS — 0 crashes, 0
 timeout-kills, 0 illegal selections, max single-game elapsed time 21.2s (well under the 120s
@@ -143,6 +147,4 @@ Submitted 2026-07-24 as Kaggle submission **54950362** (`SubmissionStatus.COMPLE
 active on the ladder as the A/B control (both submissions' μ tracked separately in
 `runs/mu_history.jsonl` going forward).
 
-**μ (Kaggle ladder):** 600.0 (as of 2026-07-24 11:53Z, submitted 2026-07-24 11:51:42.633000 -- may still be settling; re-run tools/measure.py to refresh)
-submission per CLAUDE.md's `N(μ, σ²), μ₀=600`, not yet real ladder signal; re-run
-tools/measure.py to refresh once games accumulate)
+**μ (Kaggle ladder):** 635.6 (as of 2026-07-24 16:04Z, submitted 2026-07-24 11:51:42.633000 -- may still be settling; re-run tools/measure.py to refresh)
