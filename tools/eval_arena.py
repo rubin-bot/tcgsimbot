@@ -97,7 +97,8 @@ def run_one_game(python_exe: str, candidate: str, opponent: str, candidate_deck:
                   opponent_deck: str, candidate_seat: int, seed: int, timeout_s: float,
                   rss_cap_mb: float, enforce_rss: bool, replay_out: str | None,
                   game_index: int, candidate_weights: str | None = None,
-                  opponent_weights: str | None = None) -> dict:
+                  opponent_weights: str | None = None, candidate_snapshot: str | None = None,
+                  opponent_snapshot: str | None = None) -> dict:
     cmd = [
         python_exe, WORKER,
         "--candidate", candidate, "--opponent", opponent,
@@ -111,6 +112,10 @@ def run_one_game(python_exe: str, candidate: str, opponent: str, candidate_deck:
         cmd += ["--candidate-weights", candidate_weights]
     if opponent_weights is not None:
         cmd += ["--opponent-weights", opponent_weights]
+    if candidate_snapshot is not None:
+        cmd += ["--candidate-snapshot", candidate_snapshot]
+    if opponent_snapshot is not None:
+        cmd += ["--opponent-snapshot", opponent_snapshot]
     start = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
@@ -308,6 +313,15 @@ def main() -> None:
     ap.add_argument("--opponent-weights", default=None,
                      help="Same, for --opponent search_scorer -- lets both sides run "
                           "search_scorer with different weight sets in the same game.")
+    ap.add_argument("--candidate-snapshot", default=None,
+                     help="path to a frozen search_scorer.py code snapshot (e.g. "
+                          "runs/v2_tie_break/search_scorer_v1_snapshot.py) to use for "
+                          "--candidate search_scorer INSTEAD OF the live agents/search_scorer.py "
+                          "-- lets this run pit two different CODE versions against each other, "
+                          "not just different weights (--candidate-weights, if also given, "
+                          "overrides on top of the snapshot's own module-default WEIGHTS).")
+    ap.add_argument("--opponent-snapshot", default=None,
+                     help="same as --candidate-snapshot but for --opponent search_scorer.")
     args = ap.parse_args()
 
     if bool(args.opponent) == bool(args.opponent_pool):
@@ -390,6 +404,7 @@ def main() -> None:
             opponent_deck, candidate_seat, seed, args.timeout, args.rss_cap_mb,
             enforce_rss, args.replay_out, i,
             candidate_weights=args.candidate_weights, opponent_weights=args.opponent_weights,
+            candidate_snapshot=args.candidate_snapshot, opponent_snapshot=args.opponent_snapshot,
         )
         record["game"] = i
         record["opponent_deck"] = opponent_deck

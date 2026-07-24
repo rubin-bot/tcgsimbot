@@ -52,13 +52,30 @@ def _make_random_agent(deck_list: list[int]):
 
 
 def _build_agent(name: str, deck_list: list[int], opp_deck_list: list[int], trace_fn=None,
-                  weights_path: str | None = None):
+                  weights_path: str | None = None, snapshot_path: str | None = None,
+                  snapshot_module_name: str = "search_scorer_snapshot"):
     if name == "random":
         return _make_random_agent(deck_list)
     if name == "baseline":
         from baseline import agent as baseline_agent
         return baseline_agent
     if name == "search_scorer":
+        if snapshot_path:
+            # Load a frozen code snapshot (e.g. runs/v2_tie_break/search_scorer_v1_snapshot.py)
+            # instead of the live agents/search_scorer.py, so this process can pit two
+            # DIFFERENT code versions against each other -- --candidate-weights/
+            # --opponent-weights alone only vary numeric weights on identical code. Mirrors
+            # tools/decision_diff.py's load_v1() merge: snapshot's own module-default WEIGHTS,
+            # optionally overridden by a separate weights file on top.
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(snapshot_module_name, snapshot_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            weights = dict(mod.WEIGHTS)
+            if weights_path:
+                with open(weights_path, encoding="utf-8") as f:
+                    weights.update(json.load(f))
+            return mod.make_agent(deck_list, trace_fn=trace_fn, weights=weights)
         from search_scorer import make_agent, load_weights
         weights = load_weights(weights_path) if weights_path else None
         return make_agent(deck_list, trace_fn=trace_fn, weights=weights)
@@ -92,6 +109,15 @@ def main() -> None:
                           "lets one process pit two DIFFERENTLY-weighted search_scorer "
                           "instances against each other (tools/tune_weights.py's self-relative "
                           "matchup).")
+    ap.add_argument("--candidate-snapshot", default=None,
+                     help="path to a frozen search_scorer.py code snapshot (e.g. "
+                          "runs/v2_tie_break/search_scorer_v1_snapshot.py) to use for "
+                          "--candidate search_scorer INSTEAD OF the live agents/search_scorer.py "
+                          "-- lets this process pit two different CODE versions against each "
+                          "other, not just different weights. --candidate-weights, if also "
+                          "given, overrides on top of the snapshot's own module-default WEIGHTS.")
+    ap.add_argument("--opponent-snapshot", default=None,
+                     help="same as --candidate-snapshot but for --opponent search_scorer.")
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -114,9 +140,13 @@ def main() -> None:
     trace_fn = decisions.append if log_replay else None
 
     candidate_agent = _build_agent(args.candidate, candidate_deck, opponent_deck,
-                                    trace_fn=trace_fn, weights_path=args.candidate_weights)
+                                    trace_fn=trace_fn, weights_path=args.candidate_weights,
+                                    snapshot_path=args.candidate_snapshot,
+                                    snapshot_module_name="search_scorer_snapshot_candidate")
     opponent_agent = _build_agent(args.opponent, opponent_deck, candidate_deck,
-                                   weights_path=args.opponent_weights)
+                                   weights_path=args.opponent_weights,
+                                   snapshot_path=args.opponent_snapshot,
+                                   snapshot_module_name="search_scorer_snapshot_opponent")
 
     cseat = args.candidate_seat
     oseat = 1 - cseat
